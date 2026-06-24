@@ -2,8 +2,8 @@
 _clone_*/
 _push_*/
 _workspace_*/
-
+_inspect_*/
+_skill_build/
 
 # PAC workspace state — not committed (env-specific)
 sample/**/.mcs/
-

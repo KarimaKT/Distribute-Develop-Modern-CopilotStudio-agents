@@ -1,0 +1,7 @@
+mcs.metadata:
+  componentName: Fabric Analyst
+  description: Retail data analyst agent
+kind: ConnectedAgentTool
+botSchemaName: Default_FabricAnalyst_dQTqzr
+historyType:
+  kind: ConversationHistory

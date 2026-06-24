@@ -1,5 +1,5 @@
 {
-  "powerPlatform.experimental.pacDirectory": "C:\\Users\\kkanjitajdin\\.nuget\\packages\\microsoft.powerapps.cli\\2.8.1\\tools",
+  "powerPlatform.experimental.pacDirectory": "",
   "files.associations": {
     "*.mcs.yml": "yaml"
   },
@@ -8,5 +8,10 @@
   },
   "[yaml]": {
     "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  "search.exclude": {
+    "_workspace_*/**": true,
+    "_inspect_*/**": true,
+    "_skill_build/**": true
   }
 }
