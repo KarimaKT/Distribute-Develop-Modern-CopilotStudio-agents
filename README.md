@@ -6,6 +6,7 @@ gaps that `pac` CLI does not handle out of the box.
 
 ---
 
+
 ## The problem this solves
 
 Microsoft Copilot Studio agents exist in two architectures. The newer **Modern** agent
@@ -24,53 +25,22 @@ to prove exactly what works, what breaks, and how to fix each gap.
 
 ---
 
-## What makes a Modern agent different from Classic
 
-| Property | Modern (`cliagent-1.0.0`) | Classic (`default-2.1.0`) |
-|----------|--------------------------|--------------------------|
-| Template | `cliagent-1.0.0` | `default-2.1.0` |
-| Recognizer | `CLICopilotRecognizer` | `GenerativeAIRecognizer` |
-| Topics | ❌ None — orchestration via instructions + tools | ✅ Topics-based conversation flow |
-| Instructions | `bot.configuration` field in Dataverse (authoritative) | `settings.mcs.yml` |
-| Flow tools | WorkflowTool + TaskDialog (two distinct types) | TaskDialog only |
-| Skill types | InlineAgentSkill (markdown) + skills-with-assets (ZIP/Python) | N/A |
+## Prerequisites
 
-### bot.configuration
-In Modern agents, the instructions text, AI model selection, and other settings live in
-the `configuration` field on the `bot` Dataverse record. When you edit instructions in
-the Copilot Studio UI, they are written to this field — NOT back to `settings.mcs.yml`.
+| Tool | Install |
+|------|---------|
+| pac CLI | [https://aka.ms/PowerPlatformCLI](https://aka.ms/PowerPlatformCLI) |
+| az CLI | [https://aka.ms/installazurecliwindows](https://aka.ms/installazurecliwindows) |
+| pac auth | `pac auth create --environment https://myorg.crm.dynamics.com` |
+| az login | `az login` |
 
-`pac push` writes YAML files but does not touch `bot.configuration`. This means YAML
-can become stale. This toolkit always exports `bot.configuration` and PATCHes it after
-import/push to ensure the authoritative version is deployed.
-
-### Two flow tool types
-
-**WorkflowTool** (Copilot Studio Workflows — newer pattern):
-- YAML: `translations/<schema>.tool.<name>.mcs.yml` with `kind: WorkflowTool`
-- Contains: `workflowId: <source-env-guid>`
-- Flow definition: `workflows/<name>-<guid>/workflow.json`
-
-**TaskDialog / InvokeFlowTaskAction** (Agent Flows / Power Automate — older pattern):
-- YAML: `actions/<name>.mcs.yml` with `kind: TaskDialog`
-- Contains: `flowId: <source-env-guid>` (indented under `kind: InvokeFlowTaskAction`)
-- Flow definition: `workflows/<name>-<guid>/workflow.json`
-
-In both cases, the GUID is source-environment-specific. **Path 2** (VS Code) strips
-and remaps them. **Path 1** (solution import) preserves GUIDs automatically.
-
-### Two skill types
-
-**InlineAgentSkill** — knowledge content in markdown, stored in `translations/*.skill.*.mcs.yml`.
-Works correctly with both `pac solution import` and `pac push`. No extra steps needed.
-
-**Skills with assets** — uploaded as a ZIP file (Python code, binary files).
-Copilot Studio stores a bundle reference token (`bic:bundle=catskill_*_zip_*`) in the
-botcomponent record, but the binary blob is stored separately. Neither `pac solution export`
-nor `pac clone` captures the binary blob. After import, the skill appears in the UI but its
-Python assets are missing. Our scripts detect and re-upload these blobs.
+**Permissions required:**
+- Source environment: Copilot Studio agent read access, Dataverse read
+- Target environment: Copilot Studio create/write, Dataverse write, Flow create
 
 ---
+
 
 ## Two paths
 
@@ -120,6 +90,57 @@ Developer → export.ps1 → YAML in sample/ → edit in VS Code → install.ps1
 
 ---
 
+---
+
+## Background: What makes a Modern agent different from Classic
+
+| Property | Modern (`cliagent-1.0.0`) | Classic (`default-2.1.0`) |
+|----------|--------------------------|--------------------------|
+| Template | `cliagent-1.0.0` | `default-2.1.0` |
+| Recognizer | `CLICopilotRecognizer` | `GenerativeAIRecognizer` |
+| Topics | ❌ None — orchestration via instructions + tools | ✅ Topics-based conversation flow |
+| Instructions | `bot.configuration` field in Dataverse (authoritative) | `settings.mcs.yml` |
+| Flow tools | WorkflowTool + TaskDialog (two distinct types) | TaskDialog only |
+| Skill types | InlineAgentSkill (markdown) + skills-with-assets (ZIP/Python) | N/A |
+
+### bot.configuration
+In Modern agents, the instructions text, AI model selection, and other settings live in
+the `configuration` field on the `bot` Dataverse record. When you edit instructions in
+the Copilot Studio UI, they are written to this field — NOT back to `settings.mcs.yml`.
+
+`pac push` writes YAML files but does not touch `bot.configuration`. This means YAML
+can become stale. This toolkit always exports `bot.configuration` and PATCHes it after
+import/push to ensure the authoritative version is deployed.
+
+### Two flow tool types
+
+**WorkflowTool** (Copilot Studio Workflows — newer pattern):
+- YAML: `translations/<schema>.tool.<name>.mcs.yml` with `kind: WorkflowTool`
+- Contains: `workflowId: <source-env-guid>`
+- Flow definition: `workflows/<name>-<guid>/workflow.json`
+
+**TaskDialog / InvokeFlowTaskAction** (Agent Flows / Power Automate — older pattern):
+- YAML: `actions/<name>.mcs.yml` with `kind: TaskDialog`
+- Contains: `flowId: <source-env-guid>` (indented under `kind: InvokeFlowTaskAction`)
+- Flow definition: `workflows/<name>-<guid>/workflow.json`
+
+In both cases, the GUID is source-environment-specific. **Path 2** (VS Code) strips
+and remaps them. **Path 1** (solution import) preserves GUIDs automatically.
+
+### Two skill types
+
+**InlineAgentSkill** — knowledge content in markdown, stored in `translations/*.skill.*.mcs.yml`.
+Works correctly with both `pac solution import` and `pac push`. No extra steps needed.
+
+**Skills with assets** — uploaded as a ZIP file (Python code, binary files).
+Copilot Studio stores a bundle reference token (`bic:bundle=catskill_*_zip_*`) in the
+botcomponent record, but the binary blob is stored separately. Neither `pac solution export`
+nor `pac clone` captures the binary blob. After import, the skill appears in the UI but its
+Python assets are missing. Our scripts detect and re-upload these blobs.
+
+---
+
+
 ## What pac solution import handles (verified test results)
 
 > **Common misconception**: Many developers believe skills don't work via solution import.
@@ -144,6 +165,7 @@ to the distribution solution. Without it, botcomponents (tools, skills) are NOT 
 in the solution export. `export.ps1` handles this automatically.
 
 ---
+
 
 ## VS Code workflow
 
@@ -170,20 +192,6 @@ All Modern agent YAML is plain text and fully editable. Recommended setup:
 
 ---
 
-## Prerequisites
-
-| Tool | Install |
-|------|---------|
-| pac CLI | [https://aka.ms/PowerPlatformCLI](https://aka.ms/PowerPlatformCLI) |
-| az CLI | [https://aka.ms/installazurecliwindows](https://aka.ms/installazurecliwindows) |
-| pac auth | `pac auth create --environment https://myorg.crm.dynamics.com` |
-| az login | `az login` |
-
-**Permissions required:**
-- Source environment: Copilot Studio agent read access, Dataverse read
-- Target environment: Copilot Studio create/write, Dataverse write, Flow create
-
----
 
 ## Known limitations (honest, not scary)
 
@@ -197,6 +205,7 @@ All Modern agent YAML is plain text and fully editable. Recommended setup:
 | Flow creation requires Dataverse write on `workflows` entity | Ensure deploying user has the correct security role |
 
 ---
+
 
 ## Repo structure
 
@@ -226,6 +235,7 @@ screenshots/               ← documentation screenshots
 
 ---
 
+
 ## Tested on
 
 Tested end-to-end with **Fabric Analyst** agent:
@@ -236,3 +246,5 @@ Tested end-to-end with **Fabric Analyst** agent:
 - Connection references: Power BI, Fabric REST API
 
 All 10 test cases passed. See table above.
+
+

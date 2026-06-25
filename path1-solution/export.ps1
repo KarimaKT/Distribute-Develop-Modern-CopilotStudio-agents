@@ -3,10 +3,14 @@
     Export a Modern Copilot Studio agent as a self-contained distributable package.
 
 .DESCRIPTION
-    Produces a bundle folder containing:
-      agent.zip                    pac solution export of the agent and all its components
-      skills-with-assets/          binary files for any ZIP-uploaded skills (see Gap 3 below)
-      manifest.json                inventory of what was exported and what importers need to do
+    Produces a single bundle ZIP:
+      {AgentName}-bundle.zip
+        agent.zip                    pac solution export (all components, flows, knowledge)
+        skills-with-assets/          binary files for ZIP-uploaded skills with Python assets
+        manifest.json                inventory — install.ps1 reads this to know what to do
+
+    The bundle ZIP is self-contained: share it, commit it to GitHub, or email it.
+    Recipients run install.ps1 pointing at the bundle ZIP — no other files needed.
 
     WHY THIS SCRIPT EXISTS
     ─────────────────────
@@ -25,24 +29,18 @@
          because the solution ZIP includes the file records but the bundle blob
          that references them is NOT reconstituted on import without a re-upload
 
-    WHAT THE RESULTING BUNDLE CONTAINS
-    ───────────────────────────────────
+    WHAT THE RESULTING BUNDLE CONTAINS ({AgentName}-bundle.zip)
+    ────────────────────────────────────────────────────────────
     agent.zip
       bots/{schema}/                   Bot record + configuration.json (instructions, model)
       botcomponents/{schema}.*/        All tools, skills, connection refs, eval cases
-      botcomponents/{schema}.file.*/   Binary skill asset files (SKILL.md, Python scripts, etc.)
       Workflows/                       Power Automate flow definitions
-      [Content_Types].xml
-      customizations.xml
-      solution.xml
-
-    skills-with-assets/{skill-name}/   One folder per ZIP-uploaded skill
-      {filename}                       Each binary file extracted from DV filedata field
-
-    manifest.json
-      - Agent schema name
-      - List of skills with assets (names, file counts)
-      - List of connectors that need connection wiring after import
+    
+    skills-with-assets/{skill-name}/   One folder per ZIP-uploaded skill (Python/binary)
+      SKILL.md                         Skill instructions (used for automated inline fix)
+      *.py / *.png / etc.              Binary assets (used for optional manual re-upload)
+    
+    manifest.json                      install.ps1 reads this — no parameters needed
 
     PREREQUISITES
     ─────────────
@@ -284,15 +282,55 @@ $manifest = @{
 $manifest | Set-Content (Join-Path $OutputDir "manifest.json") -Encoding UTF8
 OK "manifest.json written"
 
+# ── Step 7: Package everything into a single bundle ZIP ───────────────────────
+Step "Step 7 — Creating bundle ZIP"
+$bundleZipName = "$($bot.name -replace '[^\w\-]','-')-bundle.zip"
+$bundleZipPath = Join-Path $OutputDir $bundleZipName
+Remove-Item $bundleZipPath -ErrorAction SilentlyContinue
+
+# Add agent.zip, manifest.json, and skills-with-assets/ to one archive
+$filesToBundle = @(
+    (Join-Path $OutputDir "agent.zip"),
+    (Join-Path $OutputDir "manifest.json")
+)
+foreach ($f in $filesToBundle) {
+    if (Test-Path $f) { Compress-Archive -Path $f -DestinationPath $bundleZipPath -Update }
+}
+$skillsDir = Join-Path $OutputDir "skills-with-assets"
+if (Test-Path $skillsDir) {
+    # Add each skill folder preserving the relative path
+    Get-ChildItem $skillsDir -Recurse -File | ForEach-Object {
+        $relPath = $_.FullName.Replace($OutputDir + "\", "")
+        # Compress-Archive doesn't support relative paths well — use .NET directly
+    }
+    # Use System.IO.Compression for proper relative paths
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::Open($bundleZipPath, 'Update')
+    Get-ChildItem $skillsDir -Recurse -File | ForEach-Object {
+        $entryName = $_.FullName.Replace($OutputDir + "\", "") -replace "\\", "/"
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entryName) | Out-Null
+    }
+    $zip.Dispose()
+}
+
+$bundleSize = [Math]::Round((Get-Item $bundleZipPath).Length/1KB)
+OK "$bundleZipName ($bundleSize KB)"
+
+# Clean up loose files (agent.zip, manifest.json, skills-with-assets/ now inside bundle)
+Remove-Item (Join-Path $OutputDir "agent.zip") -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $OutputDir "manifest.json") -ErrorAction SilentlyContinue
+Remove-Item $skillsDir -Recurse -Force -ErrorAction SilentlyContinue
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "║  Export Complete                         ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  agent.zip                  : $([Math]::Round((Get-Item $zipPath).Length/1KB)) KB"
-Write-Host "  Skills with assets         : $($skillsWithAssets.Count)"
-Write-Host "  Connectors (need wiring)   : $($connRefNames.Count)"
+Write-Host "  Bundle ZIP : $bundleZipPath" -ForegroundColor Cyan
+Write-Host "  Size       : $bundleSize KB"
+Write-Host "  Skills w/assets: $($skillsWithAssets.Count)"
+Write-Host "  Connectors : $($connRefNames.Count) (need connection wiring after import)"
 Write-Host ""
-Write-Host "  Commit this folder and share. Recipients run:"
-Write-Host "    .\install.ps1 -TargetOrgUrl <url> -AuthIndex <n>" -ForegroundColor Cyan
+Write-Host "  Share this single file. Recipients run:"
+Write-Host "    .\install.ps1 -BundleZip '$bundleZipPath' -TargetOrgUrl <url>" -ForegroundColor Cyan
