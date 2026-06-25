@@ -21,4 +21,4 @@ This toolkit is a starting point for the community. Contributions welcome!
 
 ## Testing
 
-Before submitting, verify your changes against a CDX or trial Power Platform environment.
+Before submitting, verify your changes against a trial or developer Power Platform environment.

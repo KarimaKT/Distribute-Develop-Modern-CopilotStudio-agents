@@ -8,7 +8,7 @@ _inspect_*/
 _push_*/
 _skill_build/
 _test_*/
-_pb_*/
+_pb_*
 
 # PAC workspace state (env-specific, not for source control)
 **/.mcs/

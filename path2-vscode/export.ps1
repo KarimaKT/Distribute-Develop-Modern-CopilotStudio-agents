@@ -100,21 +100,34 @@ $dv = @{ Authorization="Bearer $token"; "OData-MaxVersion"="4.0"; "OData-Version
 OK "Token acquired"
 
 # ── Step 1: Validate Modern agent ─────────────────────────────────────────────
-Step "Step 1 — Validate Modern Copilot Studio agent"
+Step "Step 1 — Validate Modern Copilot Studio agent (cliagent-1.0.0)"
 $bot = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/bots($BotId)?`$select=botid,name,schemaname,template,configuration" -Headers $dv
 $cfg = $bot.configuration | ConvertFrom-Json
 
-$errors = @()
-if ($bot.template -ne "cliagent-1.0.0")                     { $errors += "template='$($bot.template)' — expected 'cliagent-1.0.0'" }
-if ($cfg.recognizer.'$kind' -ne "CLICopilotRecognizer")     { $errors += "recognizer='$($cfg.recognizer.'$kind')'" }
-$customTopics = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotid_value eq '$BotId' and componenttype eq 2&`$select=name" -Headers $dv).value
-if ($customTopics.Count -gt 0) { $errors += "$($customTopics.Count) custom topic(s)" }
-
-if ($errors.Count -gt 0) {
-    $errors | ForEach-Object { Write-Host "  ERROR: $_" -ForegroundColor Red }
-    Write-Error "Not a valid Modern Copilot Studio agent."
+# Hard requirement: cliagent-1.0.0 template.
+if ($bot.template -ne "cliagent-1.0.0") {
+    Write-Error "template='$($bot.template)' — expected 'cliagent-1.0.0'. This toolkit is for cliagent-1.0.0 agents only."
 }
-OK "$($bot.name) ($($bot.schemaname)) — Modern ✓"
+
+# Informational: recognizer type. Both CLICopilotRecognizer (NGO) and GenerativeAIRecognizer
+# (CGO) are valid in cliagent-1.0.0 containers. Export behavior is identical for both.
+$recognizerKind = $cfg.recognizer.'$kind'
+if ($recognizerKind -eq "CLICopilotRecognizer") {
+    INFO "Recognizer: CLICopilotRecognizer (Modern / NGO)"
+} elseif ($recognizerKind -eq "GenerativeAIRecognizer") {
+    INFO "Recognizer: GenerativeAIRecognizer (CGO in cliagent container) — export works the same"
+} else {
+    WARN "Recognizer: $recognizerKind (unrecognized — export will proceed)"
+}
+
+# Soft warning: custom topics suggest a Classic/Topics agent
+$customTopics = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotid_value eq '$BotId' and componenttype eq 2&`$select=name" -Headers $dv).value
+if ($customTopics.Count -gt 0) {
+    WARN "$($customTopics.Count) custom topic(s) found — looks like a Classic (topics-based) agent."
+    WARN "This toolkit is designed for instructions-based agents. Topics will clone, but test carefully."
+}
+
+OK "$($bot.name) ($($bot.schemaname)) — template: cliagent-1.0.0 ✓"
 
 # ── Step 2: pac copilot clone → YAML ─────────────────────────────────────────
 Step "Step 2 — pac copilot clone (all YAML: tools, skills, flows, connection refs)"
@@ -168,7 +181,8 @@ foreach ($skill in $skillsWithAssets) {
         $fileName = if ($child.filedata_name) { $child.filedata_name } else { $child.name -replace '^\./',''}
         $filePath = Join-Path $skillDir $fileName
         try {
-            $fileBytes = (Invoke-WebRequest -Uri "$OrgNoTrail/api/data/v9.2/botcomponents($($child.botcomponentid))/filedata" -Headers @{ Authorization="Bearer $token"; Accept="application/octet-stream" }).Content
+            $fileBytes = (Invoke-WebRequest -Uri "$OrgNoTrail/api/data/v9.2/botcomponents($($child.botcomponentid))/filedata/`$value" `
+                -Headers @{ Authorization="Bearer $token" } -UseBasicParsing).Content
             [System.IO.File]::WriteAllBytes($filePath, $fileBytes)
             OK "  $($skill.name)/$fileName ($($fileBytes.Length) bytes)"
             $n++
