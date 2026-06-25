@@ -299,60 +299,62 @@ if ($wfDirs.Count -eq 0) {
     if ($LASTEXITCODE -ne 0) { WARN "Second push exit $LASTEXITCODE" } else { OK "Second push succeeded -- tools linked to flows" }
 }
 
-# ── Step 7: Fix skills with assets ───────────────────────────────────────────
-# After pac push, skills with bic:bundle= references are broken.
-# A) Automated inline fix using SKILL.md -- restores instructions immediately.
-# B) Optional guided re-upload -- needed only for Python/code execution.
+# -- Step 7: Skills with assets require manual upload
+# Skills-with-assets have a bic:bundle= token in their type-9 record pointing to
+# Azure blob storage in the source environment. This does not transfer.
+# We do NOT silently convert to inline instructions -- that would allow the model
+# to call a skill that cannot execute Python, causing silent degradation.
+# Instead: detect broken skills, rebuild the ZIP, require manual re-upload.
 if (Test-Path $SkillsDir) {
     $skillFolders = @(Get-ChildItem $SkillsDir -Directory -ErrorAction SilentlyContinue)
     if ($skillFolders.Count -gt 0) {
-        Step "Step 7 -- Fix skills with assets ($($skillFolders.Count) skill(s))"
+        Step "Step 7 -- Skills with assets require manual upload ($($skillFolders.Count) skill(s))"
 
         $allComps     = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotid_value eq '$newBotId' and componenttype eq 9&`$select=botcomponentid,name,data" -Headers $dv).value
         $brokenSkills = @($allComps | Where-Object { $_.data -like "*bic:bundle=*" })
-        INFO "$($brokenSkills.Count) broken skill(s) found (bic:bundle= reference)"
+        INFO "$($brokenSkills.Count) skill(s) confirmed broken (bic:bundle= token — bundle not in target)"
 
         $reuploadList = @()
-
         foreach ($sf in $skillFolders) {
-            $skillMdPath = Join-Path $sf.FullName "SKILL.md"
-            if (-not (Test-Path $skillMdPath)) { WARN "No SKILL.md in '$($sf.Name)' -- skipping"; continue }
-
-            $mdText   = Get-Content $skillMdPath -Raw
-            $dispName = if ($mdText -match "(?m)^name:\s*(.+)") { $Matches[1].Trim() } else { $sf.Name }
-            $broken   = $brokenSkills | Where-Object { $_.name -eq $dispName -or $_.name -eq $sf.Name } | Select-Object -First 1
-
-            if (-not $broken) { WARN "No broken skill found matching '$dispName' -- skipping"; continue }
-
-            # A) Inline fix
-            $indented = ($mdText -split "`n") | ForEach-Object { "  $_" }
-            $newData  = "kind: InlineAgentSkill`ncontent: |-`n" + ($indented -join "`n")
-            Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents($($broken.botcomponentid))" `
-                -Method PATCH -Headers $dv -Body (@{ data = $newData } | ConvertTo-Json) | Out-Null
-            OK "  [A] '$dispName' instructions applied -- agent works now"
-
-            # B) Rebuild ZIP for optional manual re-upload
             $zipPath = Join-Path $SkillsDir "$($sf.Name).zip"
             if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
             Compress-Archive -Path (Join-Path $sf.FullName "*") -DestinationPath $zipPath -Force
-            $reuploadList += @{ name = $dispName; zipPath = $zipPath }
-            OK "  [B] ZIP rebuilt: $zipPath"
+            $reuploadList += @{ name = $sf.Name; zipPath = $zipPath }
+            OK "  Built ZIP: $zipPath"
         }
 
-        if ($reuploadList.Count -gt 0) {
-            $envId    = $OrgNoTrail -replace "https://","" -replace "\.crm\.dynamics\.com",""
-            $agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$newBotId"
+        $envId    = $OrgNoTrail -replace "https://","" -replace "\.crm\.dynamics\.com",""
+        $agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$newBotId"
+
+        Write-Host ""
+        Write-Host "  ==========================================================" -ForegroundColor Red
+        Write-Host "  ACTION REQUIRED: Skills with code assets need manual upload" -ForegroundColor Red
+        Write-Host "  ==========================================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  The following skill(s) have Python or binary assets that cannot" -ForegroundColor Yellow
+        Write-Host "  be transferred automatically. The agent is NOT fully functional" -ForegroundColor Yellow
+        Write-Host "  until you upload the ZIPs below." -ForegroundColor Yellow
+        Write-Host ""
+        foreach ($r in $reuploadList) {
+            Write-Host "  Skill : $($r.name)" -ForegroundColor White
+            Write-Host "  ZIP   : $($r.zipPath)" -ForegroundColor White
             Write-Host ""
-            Write-Host "  OPTIONAL: Restore Python/code execution (agent already works without this):" -ForegroundColor Cyan
-            foreach ($r in $reuploadList) {
-                Write-Host "    - $($r.name)  ->  ZIP: $($r.zipPath)" -ForegroundColor Cyan
-            }
-            Write-Host "    1. Open: $agentUrl"
-            Write-Host "    2. In Skills, remove the skill (bic:bundle= reference is broken)"
-            Write-Host "    3. Add skill -> Upload a skill -> select the ZIP above -> Save"
-            try { Start-Process $agentUrl; OK "Browser opened" }
-            catch { WARN "Open manually: $agentUrl" }
         }
+        Write-Host "  Steps (repeat for each skill above):" -ForegroundColor Cyan
+        Write-Host "    1. Open your agent: $agentUrl" -ForegroundColor White
+        Write-Host "    2. In the right panel, click the skill name." -ForegroundColor White
+        Write-Host "    3. Three-dot menu > Replace / Edit skill." -ForegroundColor White
+        Write-Host "    4. Upload the ZIP file shown above for that skill." -ForegroundColor White
+        Write-Host "    5. Save the agent." -ForegroundColor White
+        Write-Host ""
+        try { Start-Process $agentUrl; INFO "Opening agent in browser..." }
+        catch { WARN "Open manually: $agentUrl" }
+
+        Write-Host ""
+        WARN "Agent is NOT fully functional until skills are uploaded."
+        Write-Host "  Press Enter when you have uploaded all skills and saved, or Ctrl+C to finish now." -ForegroundColor Yellow
+        Read-Host | Out-Null
+        OK "Continuing."
     } else {
         Step "Step 7 -- No skills-with-assets (skipping)"
         OK "Nothing to repair"

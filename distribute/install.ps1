@@ -153,21 +153,34 @@ OK "pac solution import complete"
 # ---------------------------------------------------------------------------
 # Step 2 — Fix skills with assets
 # ---------------------------------------------------------------------------
+# Step 2 — Handle skills with assets (require manual upload — no silent degradation)
+# ---------------------------------------------------------------------------
+# Skills uploaded as ZIPs (with Python/binary assets) store their instructions in a
+# bundle blob in Azure storage, referenced by a bic:bundle= token in the DV record.
+# This blob does NOT transfer through solution import — it is environment-specific.
+#
+# What NOT to do: silently patch the skill to use inline markdown instructions.
+# That causes the model to call a "skill" that cannot actually execute Python code,
+# producing misleading or broken behavior without any warning.
+#
+# What we do instead:
+#   1. Detect broken skills (data contains bic:bundle= after import)
+#   2. Rebuild the skill ZIP from the bundle assets in the exported bundle
+#   3. Print clear mandatory steps for the user to re-upload via the CS UI
+#   4. The skill remains in its broken state until the user completes the upload
+#      (the CS UI will show it as needing attention — honest, not silent)
+# ---------------------------------------------------------------------------
 $skillsWithAssets = @()
 if ($manifest.PSObject.Properties["skillsWithAssets"]) {
     $skillsWithAssets = @($manifest.skillsWithAssets)
 }
 
 if ($skillsWithAssets.Count -gt 0) {
-    Step "Step 2 — Repairing $($skillsWithAssets.Count) skill(s) with assets"
+    Step "Step 2 — Skills with assets require manual upload ($($skillsWithAssets.Count) skill(s))"
 
-    # -----------------------------------------------------------------------
-    # Acquire Dataverse bearer token via Azure CLI
-    # -----------------------------------------------------------------------
-    INFO "Acquiring Dataverse access token via az account get-access-token"
+    INFO "Acquiring Dataverse access token"
     $tokenObj = az account get-access-token --resource $OrgNoTrail | ConvertFrom-Json
     $token    = $tokenObj.accessToken
-
     $dv = @{
         Authorization      = "Bearer $token"
         "OData-MaxVersion" = "4.0"
@@ -176,127 +189,86 @@ if ($skillsWithAssets.Count -gt 0) {
         "Content-Type"     = "application/json"
         Prefer             = "return=representation"
     }
-
     $dvBase = "$OrgNoTrail/api/data/v9.2"
 
-    # -----------------------------------------------------------------------
     # Locate the imported bot
-    # -----------------------------------------------------------------------
-    $botFilter  = "schemaname eq '$($manifest.agentSchema)'"
-    $botUrl     = "$dvBase/bots?`$filter=$([uri]::EscapeDataString($botFilter))&`$select=botid,name,schemaname"
-    $botResp    = Invoke-RestMethod -Uri $botUrl -Headers $dv -Method Get
-    $bot        = $botResp.value | Select-Object -First 1
+    $botFilter = "schemaname eq '$($manifest.agentSchema)'"
+    $botResp   = Invoke-RestMethod -Uri "$dvBase/bots?`$filter=$([uri]::EscapeDataString($botFilter))&`$select=botid,name" -Headers $dv
+    $bot       = $botResp.value | Select-Object -First 1
     if (-not $bot) {
-        WARN "Bot with schema '$($manifest.agentSchema)' not found in target org — skipping skill repair."
-    }
-    else {
+        WARN "Bot not found in target org — cannot verify skill state. Complete manual upload steps below."
+        $botId = "unknown"
+    } else {
         $botId = $bot.botid
         OK "Found bot: $($bot.name) ($botId)"
 
-        # -------------------------------------------------------------------
-        # Get all type-9 botcomponents for this bot
-        # -------------------------------------------------------------------
-        $compFilter = "_parentbotid_value eq '$botId' and componenttype eq 9"
-        $compUrl    = "$dvBase/botcomponents?`$filter=$([uri]::EscapeDataString($compFilter))&`$select=botcomponentid,name,data"
-        $compResp   = Invoke-RestMethod -Uri $compUrl -Headers $dv -Method Get
-        $allType9   = @($compResp.value)
+        # Verify skills are actually broken (confirm bic:bundle= is present after import)
+        $compFilter   = "_parentbotid_value eq '$botId' and componenttype eq 9"
+        $compResp     = Invoke-RestMethod -Uri "$dvBase/botcomponents?`$filter=$([uri]::EscapeDataString($compFilter))&`$select=botcomponentid,name,data" -Headers $dv
+        $brokenSkills = @($compResp.value | Where-Object { $_.data -like "*bic:bundle=*" })
+        INFO "$($brokenSkills.Count) skill(s) confirmed broken (bic:bundle= token present, bundle not in target)"
+    }
 
-        # Filter for broken (bundle-ref) skills
-        $brokenSkills = $allType9 | Where-Object { $_.data -like "*bic:bundle=*" }
-        INFO "$($brokenSkills.Count) broken skill(s) detected (data contains bic:bundle=)"
+    $envId    = $OrgNoTrail -replace "https://", "" -replace "\.crm\.dynamics\.com", ""
+    $agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$botId"
 
-        foreach ($skill in $brokenSkills) {
-            $skillId   = $skill.botcomponentid
-            $skillName = $skill.name
-            INFO "Processing skill: $skillName ($skillId)"
+    Write-Host ""
+    Write-Host "  ==========================================================" -ForegroundColor Red
+    Write-Host "  ACTION REQUIRED: Skills with code assets need manual upload" -ForegroundColor Red
+    Write-Host "  ==========================================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  The following skill(s) have Python or binary assets that cannot" -ForegroundColor Yellow
+    Write-Host "  be transferred automatically. The skill records exist in the agent" -ForegroundColor Yellow
+    Write-Host "  but are empty until you re-upload the ZIP files below." -ForegroundColor Yellow
+    Write-Host "  The agent will not work correctly until this step is complete." -ForegroundColor Yellow
+    Write-Host ""
 
-            # ---------------------------------------------------------------
-            # A) Automated inline fix
-            # ---------------------------------------------------------------
-            $fixedInline = $false
-            try {
-                # Get type-14 children of this skill component
-                $childFilter = "_parentbotcomponentid_value eq '$skillId' and componenttype eq 14"
-                $childUrl    = "$dvBase/botcomponents?`$filter=$([uri]::EscapeDataString($childFilter))&`$select=botcomponentid,name,filedata_name"
-                $childResp   = Invoke-RestMethod -Uri $childUrl -Headers $dv -Method Get
-                $mdChild     = @($childResp.value) | Where-Object { $_.filedata_name -eq "SKILL.md" } | Select-Object -First 1
+    $reuploadZips = @()
+    foreach ($skillEntry in $skillsWithAssets) {
+        $skillName     = if ($skillEntry.PSObject.Properties["skill"]) { $skillEntry.skill } else { $skillEntry }
+        $skillAssetDir = Join-Path $BundleDir "skills-with-assets" $skillName
+        $skillZipPath  = Join-Path $BundleDir "skills-with-assets" "$skillName.zip"
 
-                if ($mdChild) {
-                    $childId = $mdChild.botcomponentid
-                    INFO "  Downloading SKILL.md from child $childId"
+        if (Test-Path $skillAssetDir) {
+            if (Test-Path $skillZipPath) { Remove-Item $skillZipPath -Force }
+            Compress-Archive -Path (Join-Path $skillAssetDir "*") -DestinationPath $skillZipPath -Force
+            OK "  Built ZIP: $skillZipPath"
+            $reuploadZips += @{ name = $skillName; zip = $skillZipPath }
+        } else {
+            WARN "  No assets folder found for '$skillName' in bundle — re-download the bundle and retry."
+        }
+    }
 
-                    # Binary download — NOT OData
-                    $fileUrl = "$dvBase/botcomponents($childId)/filedata/`$value"
-                    $bytes   = (Invoke-WebRequest -Uri $fileUrl `
-                                    -Headers @{ Authorization = "Bearer $token" } `
-                                    -UseBasicParsing).Content
-                    $mdText  = [System.Text.Encoding]::UTF8.GetString($bytes)
+    Write-Host ""
+    Write-Host "  For each skill below, upload the ZIP through Copilot Studio:" -ForegroundColor Cyan
+    $i = 1
+    foreach ($r in $reuploadZips) {
+        Write-Host "  Skill $i : $($r.name)" -ForegroundColor White
+        Write-Host "    ZIP   : $($r.zip)" -ForegroundColor White
+        $i++
+    }
+    Write-Host ""
+    Write-Host "  Steps (repeat for each skill above):" -ForegroundColor Cyan
+    Write-Host "    1. Open your agent: $agentUrl" -ForegroundColor White
+    Write-Host "    2. In the right panel, click the skill name to open it." -ForegroundColor White
+    Write-Host "    3. Click the three-dot menu on the skill card > Replace / Edit skill." -ForegroundColor White
+    Write-Host "    4. Upload the ZIP file shown above for that skill." -ForegroundColor White
+    Write-Host "    5. Save the agent." -ForegroundColor White
+    Write-Host ""
 
-                    # Build InlineAgentSkill YAML (2-space indent inside content block)
-                    $indented = ($mdText -split "`n") | ForEach-Object { "  $_" }
-                    $newData  = "kind: InlineAgentSkill`ncontent: |-`n" + ($indented -join "`n")
+    try { Start-Process $agentUrl; INFO "Opening agent in browser..." }
+    catch { WARN "Could not open browser. Navigate manually: $agentUrl" }
 
-                    # PATCH the type-9 component
-                    $patchBody = @{ data = $newData } | ConvertTo-Json -Depth 5
-                    Invoke-RestMethod -Uri "$dvBase/botcomponents($skillId)" `
-                        -Method PATCH -Headers $dv -Body $patchBody | Out-Null
+    Write-Host ""
+    WARN "install.ps1 will continue, but the agent is NOT fully functional until skills are uploaded."
+    Write-Host "  Press Enter when you have uploaded all skills and saved the agent, or Ctrl+C to finish now." -ForegroundColor Yellow
+    Read-Host | Out-Null
+    OK "Continuing — verify the agent works end-to-end in Copilot Studio."
 
-                    OK "skill instructions applied — agent works now  [$skillName]"
-                    $fixedInline = $true
-                }
-                else {
-                    WARN "  No SKILL.md child found for skill '$skillName' — falling back to guided re-upload."
-                }
-            }
-            catch {
-                WARN "  Automated fix failed for '$skillName': $($_.Exception.Message)"
-            }
-
-            # ---------------------------------------------------------------
-            # B) Guided re-upload (fallback when inline fix didn't run)
-            # ---------------------------------------------------------------
-            if (-not $fixedInline) {
-                $skillAssetDir = Join-Path $BundleDir "skills-with-assets" $skillName
-                $skillZipPath  = Join-Path $BundleDir "skills-with-assets" "$skillName.zip"
-
-                if (Test-Path $skillAssetDir) {
-                    INFO "  Packaging $skillAssetDir -> $skillZipPath"
-                    if (Test-Path $skillZipPath) { Remove-Item $skillZipPath -Force }
-                    Compress-Archive -Path (Join-Path $skillAssetDir "*") `
-                        -DestinationPath $skillZipPath -Force
-                    OK "  Skill ZIP created: $skillZipPath"
-                }
-                else {
-                    WARN "  skills-with-assets/$skillName/ folder not found in bundle — cannot create ZIP."
-                }
-
-                # Build Copilot Studio URL
-                $envId    = $OrgNoTrail -replace "https://", "" -replace "\.crm\.dynamics\.com", ""
-                $agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$botId"
-
-                Write-Host ""
-                WARN "Manual re-upload required for skill: $skillName"
-                Write-Host "  Steps:" -ForegroundColor Yellow
-                Write-Host "    1. Open the agent in Copilot Studio (browser opening now):" -ForegroundColor Yellow
-                Write-Host "       $agentUrl" -ForegroundColor White
-                Write-Host "    2. Click  Topics & Plugins  in the left nav." -ForegroundColor Yellow
-                Write-Host "    3. Find the skill named '$skillName' and open it." -ForegroundColor Yellow
-                Write-Host "    4. Click the skill card's  ...  menu, then  Edit skill." -ForegroundColor Yellow
-                Write-Host "    5. Under  Upload skill ZIP  (or  Replace), upload:" -ForegroundColor Yellow
-                Write-Host "       $skillZipPath" -ForegroundColor White
-                Write-Host "    6. Click Save, then Publish." -ForegroundColor Yellow
-                Write-Host ""
-
-                try { Start-Process $agentUrl } catch { WARN "Could not open browser: $($_.Exception.Message)" }
-            }
-        } # foreach broken skill
-    } # bot found
-} # skills-with-assets
-else {
+} else {
     Step "Step 2 — No skills-with-assets (skipping)"
     OK "Nothing to repair"
 }
-
 # ---------------------------------------------------------------------------
 # Step 3 — Summary
 # ---------------------------------------------------------------------------
