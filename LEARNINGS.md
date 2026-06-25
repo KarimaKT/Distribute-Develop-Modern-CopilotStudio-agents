@@ -236,32 +236,48 @@ SUMMARY of knowledge source behavior:
   Skills with assets (ZIP+Python)   ❌ bic:bundle= broken — needs inline fix
 
 
-## 11. Connector types tested — and what was NOT tested
+## 11. Connector types tested — and known platform gaps
 
 ### What we tested
 
 All ConnectorTool instances in our test agent use **standard Microsoft-published connectors**
-(specifically `shared_powerbi` — the Power BI connector). These connectors have:
-- No custom code
-- No Azure Functions backend
-- `connectorId` is a stable platform reference string (e.g. `/providers/Microsoft.PowerApps/apis/shared_powerbi`)
-- Export/import just carries the `connectorId` — the connection reference record is created empty and wired manually
+(specifically `shared_powerbi` — the Power BI connector). These have stable `connectorId` strings,
+no custom code, and no Azure Functions. Export/import carries the `connectorId` reference;
+the connection reference is created empty and wired manually. This worked correctly.
 
-This is the simplest and most stable connector scenario. It worked correctly.
+### Known gap — Connection references from the new CS UI (reported, not reproduced)
 
-### What was NOT tested — Custom connectors with inline code
+Reports from the Copilot Studio community (June 2026) indicate that connection references
+created via the **newer Copilot Studio UI** may not point at the underlying connector records
+correctly. This would break solution export because `AddSolutionComponent` for a malformed
+connection reference would either fail or produce a solution that errors on import.
 
-**Custom connectors** (connectors built by the agent author with custom API definitions) come in two forms:
+**This has not been reproduced or verified in this toolkit's own testing.** Our test agent
+uses connection references created before this UI change and they export correctly.
 
-1. **No inline code** — connector definition only (OpenAPI spec, auth). These travel in the solution ZIP as a customapi record. *Likely works, not tested.*
+If you hit this: file feedback on the platform issue. The workaround is to check your
+connection reference records in PPAC / DV before export and confirm they have a valid
+`connectorid` foreign key set.
 
-2. **With inline code** — connector definition + embedded C# script actions, backed by Azure Functions. These require an Azure Function to be deployed to Azure alongside the connector definition. This deployment is known to be unreliable on import — the Azure Function may not be provisioned correctly, leaving the connector defined but non-functional.
+### Known gap — Custom connectors with inline code
 
-**This is a platform-level limitation, not specific to this toolkit.** The instability exists with any Power Platform solution that contains custom connectors with inline code. Mitigation: prefer custom connectors without inline code, or use flows/plugins for the code layer.
+Custom connectors with embedded C# script actions (Azure Functions backend) are known
+to have unreliable provisioning during solution import. This is a platform-level issue
+independent of this toolkit. Prefer connectors without inline code, or isolate the
+code layer in flows/plugins.
 
-### What was NOT tested — McpTool (MCP server tools)
+### Known gap — McpTool (MCP server tools)
 
-McpTool definitions carry the MCP server URL and registered tool list. The tool definition exports and imports correctly. However:
-- The MCP server itself must be running and reachable at the same URL in the target environment
-- Local MCP servers (e.g. running on localhost with a dev tunnel URL) have env-specific tunnel URLs that break after import
-- Mitigation: use a stable hosted URL for MCP servers, or re-wire the McpTool URL after import
+McpTool definitions export and import correctly. The MCP server itself must be running
+and reachable at the same URL in the target environment. Local servers with dev-tunnel
+URLs break on import — use a stable hosted URL or re-wire after import.
+
+### pac CLI alpha — native Modern agent support
+
+The pac CLI team is adding native `cliagent-1.0.0` support. Alpha builds are at:
+https://dev.azure.com/msazure/One/_artifacts/feed/CAP_ISVExp_Tools_Daily
+
+If the alpha handles `bot.configuration`, flow GUIDs, and skills correctly, it will
+supersede this toolkit for Path 2 (VS Code developer workflow). Test the alpha before
+committing to either approach. Path 1 (solution ZIP distribution) may remain useful
+regardless, as solution packaging is a separate concern from push/pull.

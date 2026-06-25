@@ -1,25 +1,35 @@
 # Modern Copilot Studio Agent — Export / Import Toolkit
 
-A complete toolkit for exporting, committing to source control, and importing
-**Modern Copilot Studio agents** (`cliagent-1.0.0`) — including full coverage of the ALM
-gaps that `pac` CLI does not handle out of the box.
+> **Note on pac CLI alpha:** The pac CLI team is adding native support for Modern (cliagent-1.0.0) agents.
+> Alpha builds are available at the [CAP_ISVExp_Tools_Daily feed](https://dev.azure.com/msazure/One/_artifacts/feed/CAP_ISVExp_Tools_Daily).
+> This toolkit is a tested bridge for the current stable pac CLI (2.8.x). As pac native support matures,
+> it will become the preferred path. Check the alpha before deciding which approach fits your needs.
+
+A PowerShell toolkit for exporting, committing to source control, and importing
+**Modern Copilot Studio agents** (`cliagent-1.0.0`) — working around specific, tested gaps
+in the current stable `pac` CLI.
 
 ---
 
-## The problem this solves
+## What this solves (and what it does not)
 
-Microsoft Copilot Studio agents exist in two architectures. The newer **Modern** agent
-(template `cliagent-1.0.0`, recognizer `CLICopilotRecognizer`) has ALM behaviors that
-the standard `pac copilot clone/push` and `pac solution` workflows do not fully support:
+### Tested gaps this toolkit closes
 
 | Gap | Without this toolkit |
 |-----|---------------------|
 | `bot.configuration` (instructions, model) | Not written by `pac push`; edits made in the Copilot Studio UI diverge from YAML silently |
 | Flow tool GUIDs (`workflowId`, `flowId`) | Source-env GUIDs embedded in YAML — pac push fails with "Entity 'Workflow' Does Not Exist" |
-| Skills uploaded as ZIP files (Python/binary assets) | Appear in the UI after import but binary assets are unreachable at runtime. *Note: markdown-only InlineAgentSkills work correctly — this gap affects only ZIP-bundled skills with Python scripts or binary files.* |
-| Botcomponents always land in Default Solution | Tools, skills, and knowledge added via the UI go to Default Solution regardless of which named solution the agent belongs to — a naive pac solution export misses them |
+| Skills uploaded as ZIP files (Python/binary assets) | Appear in the UI after import but binary assets are unreachable at runtime |
+| Botcomponents landing in Default Solution | Tools, skills, and knowledge added via the CS UI go to Default Solution regardless of which named solution the agent belongs to — a naive `pac solution export` misses them |
 
-This toolkit closes all four gaps with tested, scripted solutions.
+### Known gaps this toolkit does NOT solve
+
+| Gap | Status |
+|-----|--------|
+| **Connection references from the new CS UI** | Reports indicate that connection references created by the newer Copilot Studio UI may not point at connector records correctly, which breaks solution export. **Not reproduced or mitigated here.** Agents with older-style connections (pre-2026 UI) work. |
+| **Custom connectors with inline code** | Provisioning of Azure Functions-backed connectors is unreliable during solution import. Platform issue, not specific to this toolkit. |
+| **MCP server tools** | Tool definition transfers; server must be running and reachable at the same URL in target. Local dev-tunnel URLs break on import. |
+| **pac CLI alpha native support** | The platform team is building this into pac. For the most current solution, check the [daily feed alpha](https://dev.azure.com/msazure/One/_artifacts/feed/CAP_ISVExp_Tools_Daily). |
 
 ---
 
@@ -156,15 +166,16 @@ for pac CLI integration and `.mcs.yml` schema validation.
 
 ## Known limitations
 
-| Limitation | Mitigation |
-|------------|-----------|
-| Skills with binary assets | `install.ps1` auto-fixes instructions; optional manual ZIP re-upload for Python execution |
+| Limitation | Notes |
+|------------|-------|
+| Skills with binary assets | `install.ps1` auto-fixes instructions; Python execution needs manual ZIP re-upload |
 | ConnectedAgentTool | Child agent must exist in target env by the same schema name |
 | Connection wiring | One-time manual step per env per connector (normal platform behavior) |
 | Claude/Anthropic model | Target env must have the same model series enabled |
-| Botcomponent schemaname > 100 chars | `install.ps1` warns; rename the tool in source env |
-| **Custom connectors with inline code** | **Not tested.** Custom connectors that use inline C# code (Azure Functions-backed) may not deploy reliably — this is a known Power Platform platform instability independent of this toolkit. Standard Microsoft connectors (Power BI, Office 365, etc.) are not affected. |
-| **McpTool (MCP server tools)** | **Not tested.** The tool definition (server URL, tool list) transfers, but the MCP server itself must be running and reachable in the target environment. Local MCP servers with dev tunnels require re-wiring. |
+| Botcomponent schemaname > 100 chars | Rename the tool in source env before exporting |
+| **Connection refs from new CS UI** | **Not mitigated.** Reports indicate newer CS UI creates connection references without backing connector records — solution export breaks for these. Agents using older-style connections are unaffected. |
+| **Custom connectors with inline code** | Platform-level reliability issue with Azure Functions provisioning on import. Not specific to this toolkit. |
+| **McpTool** | Tool definition transfers; MCP server must be running at the same URL in target. |
 
 ---
 
