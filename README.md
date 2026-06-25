@@ -1,100 +1,129 @@
-# Modern Copilot Studio Agent — Export / Import Toolkit
+# Modern Copilot Studio Agent — Toolkit
 
-> **pac CLI gap (June 2026):** `pac copilot pack` crashes on cliagent-1.0.0 workspaces. `pac copilot pull` crashes. `pac copilot extract-template` + `create` silently ignores agent configuration (open issue #1259, 10+ months). Native cliagent ALM support is on the pac CLI roadmap — monitor release notes at https://aka.ms/PowerPlatformCLI. Until it ships, this toolkit fills the gaps. See [LEARNINGS.md §12](LEARNINGS.md) for the full comparison.
+> **pac CLI gap (June 2026):** `pac copilot pack` crashes on cliagent-* workspaces and `pac copilot pull` crashes. `pac copilot extract-template` + `create` silently ignores agent configuration (open issue #1259). Native cliagent ALM support is on the pac CLI roadmap. Until it ships, this toolkit fills the gaps. See [LEARNINGS.md](LEARNINGS.md) for the full comparison.
 
-PowerShell scripts to export, distribute, and import **Modern Copilot Studio agents**
-(`cliagent-1.0.0`) across environments — filling specific tested gaps in the current stable pac CLI.
+Two workflows for Modern Copilot Studio agents (`cliagent-*` template):
+- **distribute/** — export an agent as a ZIP, share it, install it anywhere
+- **develop/** — clone an agent to YAML, edit in VS Code, deploy changes
 
 ---
 
 ## Prerequisites
 
+Both paths require:
+
 | Tool | Install |
 |------|---------|
 | pac CLI | https://aka.ms/PowerPlatformCLI |
-| az CLI  | https://aka.ms/installazurecliwindows |
+| az CLI | https://aka.ms/installazurecliwindows |
 | pac auth | `pac auth create --environment https://yourorg.crm.dynamics.com` |
 | az login | `az login` (needs Dataverse access) |
+
+The **develop/** path additionally requires:
+- [Power Platform Tools for VS Code](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode) for YAML editing and schema hints
+
+---
+
+## What agent components are supported
+
+This matrix applies to **both paths**. Check it before using either workflow on your agent.
+
+| Component | distribute/ | develop/ | Notes |
+|-----------|:-----------:|:--------:|-------|
+| Agent instructions + model (bot.configuration) | ✅ | ✅ | Authoritative version always exported and applied on import |
+| ConnectorTools (standard MS connectors) | ✅ | ✅ | Connection wiring is one manual step per env — expected platform behavior |
+| WorkflowTool / TaskDialog (Agent Flows) | ✅ | ✅ | distribute/: GUIDs preserved; develop/: remapped automatically |
+| InlineAgentSkill (markdown-only skills) | ✅ | ✅ | Full round-trip, no extra steps |
+| Skills with Python/code assets | ⚠️ | ⚠️ | Instructions restored automatically. Python execution needs a manual ZIP re-upload in CS UI after import |
+| InlineAgentSkill (instructions only, no code) | ✅ | ✅ | Fully automated |
+| URL knowledge sources | ✅ | ✅ | Full round-trip |
+| File knowledge (PDF, DOCX) | ✅ | ❌ | Binary preserved in solution ZIP; not captured by pac clone |
+| Evaluation test cases | ✅ | ❌ | In solution ZIP; not captured by pac clone |
+| ConnectedAgentTool | ✅ | ✅ | Child agent must exist in target by same schema name |
+| **Custom connectors with inline code** | ❌ | ❌ | Azure Functions provisioning is unreliable — platform issue |
+| **MCP server tools** | ⚠️ | ⚠️ | Tool definition transfers; server must be running at same URL in target |
+| **Connection refs (new 2026 CS UI)** | ❌ | ❌ | Reports: new UI creates connection refs without backing connector record |
+| Classic agents (default-2.x.x template) | ❌ | ❌ | Different architecture — use standard pac solution or pac copilot push |
 
 ---
 
 ## Get started
 
-**To distribute an agent as a ZIP (share with others or check in to source control):**
+### Identify your agent
+
+Both scripts require your agent's **BotId** — the GUID in the Copilot Studio URL:  
+`https://copilotstudio.microsoft.com/environments/{envId}/agents/{BotId}`
+
+Your agent must use the `cliagent-*` template (visible in PPAC → agent record). Classic agents (`default-2.x.x`) are not supported.
+
+---
+
+### distribute/ — Share an agent as a ZIP
+
+**Export** (run once to produce a shareable bundle):
 ```powershell
-.\path1-solution\export.ps1 `
+.\distribute\export.ps1 `
   -SourceOrgUrl "https://yourorg.crm.dynamics.com" `
   -BotId        "your-bot-guid" `
   -SolutionName "MyAgentSample" `
   -PublisherName "YourPublisher"
-# Produces MyAgent-bundle.zip — share that file.
+# Produces: MyAgent-bundle.zip
 ```
 
-**To install from a bundle ZIP:**
+**Install** (anyone can run this against their own environment):
 ```powershell
-.\path1-solution\install.ps1 `
+.\distribute\install.ps1 `
   -BundleZip    ".\MyAgent-bundle.zip" `
   -TargetOrgUrl "https://targetorg.crm.dynamics.com"
 # Agent appears in Copilot Studio. Wire connections in PPAC when prompted.
 ```
 
-**To clone an agent for editing in VS Code, then deploy:**
+After install: wire connections for any ConnectorTool flows in PPAC → Power Automate.
+
+---
+
+### develop/ — Clone an agent to YAML, edit, deploy
+
+**Export** (clone agent to editable YAML):
 ```powershell
-# 1. Clone to editable YAML
-.\path2-vscode\export.ps1 `
+.\develop\export.ps1 `
   -SourceOrgUrl "https://yourorg.crm.dynamics.com" `
   -BotId        "your-bot-guid" `
   -AgentName    "My Agent"
+# Produces: sample/My Agent/ (YAML), agent-config.json, skills-with-assets/
+```
 
-# 2. Edit YAML in VS Code (settings.mcs.yml, translations/, workflows/)
+**Edit** YAML files in VS Code:
+- `sample/My Agent/settings.mcs.yml` — agent name, auth, model
+- `sample/My Agent/translations/*.mcs.yml` — tool/skill definitions
+- `sample/My Agent/workflows/*/workflow.json` — flow logic
 
-# 3. Deploy to any environment
-.\path2-vscode\install.ps1 `
+**Deploy** to any environment:
+```powershell
+.\develop\install.ps1 `
   -TargetOrgUrl    "https://targetorg.crm.dynamics.com" `
   -AgentName       "My Agent" `
   -AgentSchemaName "publisher_MyAgent_xxxxx"
+# Agent created, YAML pushed, flows remapped, bot.configuration applied.
 ```
-
-**Where to find your BotId:** open your agent in Copilot Studio — the GUID is in the URL.
-
----
-
-## What this handles
-
-Path 1 (solution ZIP) covers: `bot.configuration`, InlineAgentSkills, ConnectorTools,
-WorkflowTool/TaskDialog flows (GUIDs preserved), URL + file knowledge, eval test cases.
-Skills with Python/binary assets are auto-repaired post-import.
-
-See the [full component matrix in LEARNINGS.md](LEARNINGS.md#4-what-pac-solution-import-gets-right).
-
----
-
-## Known limitations
-
-| Limitation | Notes |
-|------------|-------|
-| Skills with binary assets | Instructions auto-fixed; Python execution needs a manual ZIP re-upload via CS UI |
-| ConnectedAgentTool | Child agent must exist in target by the same schema name |
-| Connection wiring | One-time manual step in PPAC per connector (standard platform behavior) |
-| Model availability | Target env must have the same model series (e.g. Claude/Anthropic) enabled |
-| **Connection refs (new CS UI)** | Reports indicate 2026 CS UI creates connection references without a backing connector record — breaks solution export. Not reproduced here; agents using standard connections are unaffected. |
-| **Custom connectors with inline code** | Azure Functions provisioning on import is unreliable — platform issue, not toolkit-specific. |
-| **MCP server tools** | Tool definition transfers; MCP server must be running at the same URL in target. Local dev-tunnel URLs break. |
-
-See [LEARNINGS.md](LEARNINGS.md) for detailed technical findings, tested patterns, and pac CLI known bugs.
 
 ---
 
 ## Repo structure
 
 ```
-path1-solution/
-  export.ps1    ← produces {AgentName}-bundle.zip
-  install.ps1   ← imports bundle, fixes skills-with-assets
+distribute/
+  export.ps1    ← export agent → {AgentName}-bundle.zip
+  install.ps1   ← install from bundle ZIP
 
-path2-vscode/
-  export.ps1    ← pac clone + bot.configuration + skill binary download
+develop/
+  export.ps1    ← pac clone + bot.configuration + skill asset download
   install.ps1   ← bot pre-create + pac push + flow GUID remap + bot.configuration PATCH
 
-LEARNINGS.md    ← all tested findings with evidence
+LEARNINGS.md    ← tested findings, pac CLI gap analysis, known bugs
+CONTRIBUTING.md ← how to contribute
 ```
+
+---
+
+See [LEARNINGS.md](LEARNINGS.md) for technical details on all gaps, pac CLI known bugs, the Default Solution membership problem, and the full component matrix.
