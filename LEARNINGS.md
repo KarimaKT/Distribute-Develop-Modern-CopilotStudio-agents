@@ -179,3 +179,24 @@ All Modern agent content is plain text and fully editable in VS Code:
 
 In both paths, skills with assets require the post-import fix (detect `bic:bundle=`, rebuild ZIP, re-upload). This is automated in our install scripts.
 
+
+
+## 9. Skills with assets — final resolution
+
+AUTOMATED FIX (tested):
+After solution import or pac push, skills with bic:bundle= references can be partially
+fixed by reading the SKILL.md from the imported type-14 file component and patching
+the type-9 skill data field with inline InlineAgentSkill content.
+
+Fix steps:
+1. Find type-9 skills where data contains bic:bundle=
+2. Get type-14 children: GET /botcomponents?filter=_parentbotcomponentid_value eq {skillId}
+3. Find the SKILL.md child (filedata_name = 'SKILL.md')
+4. Read binary: GET /botcomponents({childId})/filedata/\ → UTF-8 text
+5. PATCH /botcomponents({skillId}) with data = inline InlineAgentSkill YAML
+
+What is restored: skill name, description, full instructions (what agent reads)
+What is NOT restored: Python execution via Code Interpreter (requires bundle)
+
+For production agents where Python execution is required: manual ZIP re-upload via UI.
+For sample distribution: automated fix is sufficient — instructions work correctly.
