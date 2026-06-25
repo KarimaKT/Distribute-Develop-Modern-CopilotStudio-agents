@@ -37,7 +37,7 @@
       Workflows/                       Power Automate flow definitions
     
     skills-with-assets/{skill-name}/   One folder per ZIP-uploaded skill (Python/binary)
-      SKILL.md                         Skill instructions (used for automated inline fix)
+      SKILL.md                         Skill instructions (re-uploaded via CS UI; manual step)
       *.py / *.png / etc.              Binary assets (used for optional manual re-upload)
     
     manifest.json                      install.ps1 reads this — no parameters needed
@@ -168,8 +168,14 @@ if ($existingSol.Count -gt 0) {
     $solId = $existingSol[0].solutionid
     WARN "Solution already exists: $solId — reusing"
 } else {
-    $pub = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/publishers?`$filter=uniquename eq '$PublisherName'&`$select=publisherid" -Headers $dv).value
-    if (-not $pub) { Write-Error "Publisher '$PublisherName' not found. Run: pac solution create-settings" }
+    # Resolve publisher by uniquename first, then fall back to customization prefix (what most
+    # users actually know, e.g. "cr7a0"). This avoids a hard stop when the friendly prefix is passed.
+    $pub = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/publishers?`$filter=uniquename eq '$PublisherName'&`$select=publisherid,uniquename" -Headers $dv).value
+    if (-not $pub) {
+        $pub = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/publishers?`$filter=customizationprefix eq '$PublisherName'&`$select=publisherid,uniquename" -Headers $dv).value
+        if ($pub) { INFO "Resolved publisher by prefix '$PublisherName' -> uniquename '$($pub[0].uniquename)'" }
+    }
+    if (-not $pub) { Write-Error "Publisher '$PublisherName' not found (tried uniquename and customization prefix). List publishers: pac org list, or check PPAC > Solutions > Publishers." }
     $sol = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/solutions" -Method POST -Headers (@{} + $dv + @{Prefer="return=representation"}) -Body (@{
         uniquename   = $SolutionName
         friendlyname = $SolutionName
@@ -184,45 +190,78 @@ if ($existingSol.Count -gt 0) {
 Step "Step 3 — Add agent components to solution (surgical graph traversal)"
 INFO "Walking agent component graph — same approach as pac copilot clone"
 
-# Helper: add component to solution, ignore if already present
-function Add-ToSolution([string]$componentId, [int]$componentType) {
-    try {
-        Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/AddSolutionComponent" -Method POST -Headers $dv -Body (@{
-            ComponentId = $componentId; ComponentType = $componentType
-            SolutionUniqueName = $SolutionName; AddRequiredComponents = $false; DoNotIncludeSubcomponents = $false
-        } | ConvertTo-Json) | Out-Null
-    } catch {} # already in solution = OK
+# Helper: add a component to the solution, trying each candidate component-type.
+#
+# WHY CANDIDATE TYPES: the Dataverse solutioncomponent "componenttype" enum for bots and
+# botcomponents was renumbered across platform versions. Older environments use bot=10185 /
+# botcomponent=10186 / connectionreference=10132; newer environments use 10223 / 10224 / 10161.
+# A hardcoded value silently 404s on the "wrong" platform — and because the failure used to be
+# swallowed, the export produced an EMPTY bundle with a green "success" message. This helper
+# tries each known type, treats an "already present" error as success, and THROWS if every
+# candidate fails so the problem is loud, not silent.
+#
+# Returns the component-type that worked (so callers can count real successes).
+function Add-ToSolution {
+    param([string]$ComponentId, [int[]]$CandidateTypes, [string]$Label = "component")
+    $lastErr = $null
+    foreach ($ct in $CandidateTypes) {
+        try {
+            Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/AddSolutionComponent" -Method POST -Headers $dv -Body (@{
+                ComponentId = $ComponentId; ComponentType = $ct
+                SolutionUniqueName = $SolutionName; AddRequiredComponents = $false; DoNotIncludeSubcomponents = $false
+            } | ConvertTo-Json) | Out-Null
+            return $ct
+        } catch {
+            $code = $null
+            try { $code = [int]$_.Exception.Response.StatusCode.value__ } catch {}
+            $msg = $_.ErrorDetails.Message
+            if ($code -eq 404) { $lastErr = "HTTP 404 — componenttype $ct not valid in this environment"; continue }
+            # Any non-404 error on a valid type almost always means "already a component of the
+            # solution" — that is the desired end state, so treat it as success.
+            if ($msg -match 'already|duplicate|0x80060889|0x80048403') { return $ct }
+            $lastErr = "HTTP $code — $msg"; continue
+        }
+    }
+    throw "Failed to add $Label ($ComponentId) to solution '$SolutionName'. Last error: $lastErr"
 }
 
-# Add the bot itself (type 10185)
-Add-ToSolution $BotId 10185
-INFO "Added bot"
+# Component-type candidates per logical kind (older platform value first, newer second).
+$TYPE_BOT     = @(10185, 10223)
+$TYPE_BOTCOMP = @(10186, 10224)
+$TYPE_FLOW    = @(29)
+$TYPE_CONNREF = @(10132, 10161)
+
+# Add the bot itself
+$resolvedBotType = Add-ToSolution $BotId $TYPE_BOT "bot"
+INFO "Added bot (componenttype $resolvedBotType)"
 
 # Get all botcomponents (type 9 = tools/skills, type 14 = file assets, type 15 = gpt config)
 $allBotComps = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotid_value eq '$BotId'&`$select=botcomponentid,name,componenttype,data" -Headers $dv).value
 $flowIds = @()
+$addedBotComps = 0
 foreach ($comp in $allBotComps) {
-    Add-ToSolution $comp.botcomponentid 10186
+    Add-ToSolution $comp.botcomponentid $TYPE_BOTCOMP "botcomponent '$($comp.name)'" | Out-Null
+    $addedBotComps++
     # Track flow references
     if ($comp.data -match "(?m)^workflowId: ([a-f0-9\-]{36})") { $flowIds += $Matches[1] }
     if ($comp.data -match "(?m)^  flowId: ([a-f0-9\-]{36})")   { $flowIds += $Matches[1] }
     # For skills with assets, also add type-14 children
     if ($comp.data -like "*bic:bundle=*") {
         $children = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotcomponentid_value eq '$($comp.botcomponentid)'&`$select=botcomponentid,filedata_name" -Headers $dv).value
-        foreach ($child in $children) { Add-ToSolution $child.botcomponentid 10186 }
+        foreach ($child in $children) { Add-ToSolution $child.botcomponentid $TYPE_BOTCOMP "skill file" | Out-Null; $addedBotComps++ }
         INFO "Skill with assets '$($comp.name)': added $($children.Count) file component(s)"
     }
 }
-OK "Added $($allBotComps.Count) botcomponents"
+OK "Added $addedBotComps botcomponents"
 
 # Add workflows (type 29)
 $flowIds = $flowIds | Sort-Object -Unique
 foreach ($fid in $flowIds) {
-    Add-ToSolution $fid 29
+    Add-ToSolution $fid $TYPE_FLOW "flow" | Out-Null
 }
 OK "Added $($flowIds.Count) flow(s)"
 
-# Add connection references (type 10132) — enumerate from workflow definitions
+# Add connection references (type 10132 / 10161) — enumerate from workflow definitions
 $connRefNames = @()
 foreach ($fid in $flowIds) {
     try {
@@ -233,11 +272,26 @@ foreach ($fid in $flowIds) {
     } catch {}
 }
 $connRefNames = $connRefNames | Sort-Object -Unique | Where-Object { $_ }
+$addedConnRefs = 0
 foreach ($crName in $connRefNames) {
     $cr = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/connectionreferences?`$filter=connectionreferencelogicalname eq '$crName'&`$select=connectionreferenceid" -Headers $dv).value
-    if ($cr) { Add-ToSolution $cr[0].connectionreferenceid 10132 }
+    if ($cr) { Add-ToSolution $cr[0].connectionreferenceid $TYPE_CONNREF "connection reference '$crName'" | Out-Null; $addedConnRefs++ }
 }
-OK "Added $($connRefNames.Count) connection reference(s)"
+OK "Added $addedConnRefs connection reference(s)"
+
+# ── Verification net — fail LOUDLY if the surgical add did not land ────────────
+# This is the safety guarantee against the silent-empty-bundle failure mode. We count what is
+# actually in the solution and compare it to what we expected to add. Sub-components pulled in
+# automatically (DoNotIncludeSubcomponents=$false) mean the real count is >= the expected
+# minimum; if it is far short, a component-type mismatch silently failed and we must abort
+# BEFORE pac export produces a broken bundle.
+$expectedMin = 1 + $addedBotComps + $flowIds.Count + $addedConnRefs
+$actualCount = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/solutioncomponents?`$filter=_solutionid_value eq $solId&`$select=componenttype&`$count=true" -Headers $dv).'@odata.count'
+INFO "Solution component check: $actualCount present, expected at least $expectedMin"
+if ($actualCount -lt $expectedMin) {
+    Write-Error "Solution '$SolutionName' has only $actualCount component(s) but at least $expectedMin were expected. The surgical add did not fully land (likely a Dataverse component-type mismatch). Aborting before producing an incomplete bundle."
+}
+OK "Verified $actualCount component(s) in solution"
 
 # ── Step 4: pac solution export ───────────────────────────────────────────────
 Step "Step 4 — pac solution export"
@@ -246,6 +300,18 @@ $zipPath = Join-Path $OutputDir "agent.zip"
 & $PacExe solution export --name $SolutionName --path $zipPath --environment $OrgNoTrail --overwrite 2>&1 | ForEach-Object { INFO $_ }
 if ($LASTEXITCODE -ne 0) { Write-Error "pac solution export failed" }
 OK "agent.zip ($([Math]::Round((Get-Item $zipPath).Length/1KB))KB)"
+
+# Sanity check — the exported ZIP must actually contain the bot definition. A tiny ZIP with no
+# bot means the surgical add failed and we are about to ship a useless bundle.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zc = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+$hasBot = @($zc.Entries | Where-Object { $_.FullName -match '^bots/.+/bot\.xml$' }).Count -gt 0
+$compEntries = @($zc.Entries | Where-Object { $_.FullName -match '^botcomponents/' -and $_.FullName -match 'botcomponent\.xml$' }).Count
+$zc.Dispose()
+if (-not $hasBot) {
+    Write-Error "Exported agent.zip contains no bot definition (bots/*/bot.xml missing). The export is incomplete — do not distribute this bundle."
+}
+INFO "ZIP sanity: bot.xml present, $compEntries botcomponent(s) packaged"
 
 # ── Step 5: Export binary skill assets (skills with assets) ───────────────────
 Step "Step 5 — Export binary skill assets (bic:bundle= skills)"
@@ -298,7 +364,7 @@ $manifest = @{
     connectorsRequired = $connRefNames
     importNotes = @(
         "Run install.ps1 to import this bundle.",
-        "install.ps1 will: (1) pac solution import, (2) fix skills with assets.",
+        "install.ps1 will: (1) pac solution import, (2) guide manual re-upload of skills with assets.",
         "After import, manually wire connections for: $($connRefNames -join ', ')."
     )
 } | ConvertTo-Json -Depth 5
@@ -311,28 +377,23 @@ $bundleZipName = "$($bot.name -replace '[^\w\-]','-')-bundle.zip"
 $bundleZipPath = Join-Path $OutputDir $bundleZipName
 Remove-Item $bundleZipPath -ErrorAction SilentlyContinue
 
-# Add agent.zip, manifest.json, and skills-with-assets/ to one archive
-$filesToBundle = @(
-    (Join-Path $OutputDir "agent.zip"),
-    (Join-Path $OutputDir "manifest.json")
-)
-foreach ($f in $filesToBundle) {
-    if (Test-Path $f) { Compress-Archive -Path $f -DestinationPath $bundleZipPath -Update }
-}
-$skillsDir = Join-Path $OutputDir "skills-with-assets"
-if (Test-Path $skillsDir) {
-    # Add each skill folder preserving the relative path
-    Get-ChildItem $skillsDir -Recurse -File | ForEach-Object {
-        $relPath = $_.FullName.Replace($OutputDir + "\", "")
-        # Compress-Archive doesn't support relative paths well — use .NET directly
+# Build the bundle entirely with System.IO.Compression for clean, warning-free relative paths.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::Open($bundleZipPath, 'Create')
+try {
+    foreach ($f in @((Join-Path $OutputDir "agent.zip"), (Join-Path $OutputDir "manifest.json"))) {
+        if (Test-Path $f) {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f, (Split-Path $f -Leaf)) | Out-Null
+        }
     }
-    # Use System.IO.Compression for proper relative paths
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::Open($bundleZipPath, 'Update')
-    Get-ChildItem $skillsDir -Recurse -File | ForEach-Object {
-        $entryName = $_.FullName.Replace($OutputDir + "\", "") -replace "\\", "/"
-        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entryName) | Out-Null
+    $skillsDir = Join-Path $OutputDir "skills-with-assets"
+    if (Test-Path $skillsDir) {
+        Get-ChildItem $skillsDir -Recurse -File | ForEach-Object {
+            $entryName = $_.FullName.Replace($OutputDir + "\", "") -replace "\\", "/"
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entryName) | Out-Null
+        }
     }
+} finally {
     $zip.Dispose()
 }
 

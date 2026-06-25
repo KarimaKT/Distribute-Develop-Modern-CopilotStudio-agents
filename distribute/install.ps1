@@ -26,16 +26,19 @@
     SKILLS-WITH-ASSETS LIMITATION
     ------------------------------
     Skills whose instructions are stored as file blobs (type-9 botcomponent records whose `data`
-    field contains the sentinel string "bic:bundle=") are NOT fully restored by the solution
-    import alone.  This script repairs them two ways:
+    field contains the sentinel string "bic:bundle=") are NOT restored by the solution import.
+    The bundle blob lives in Azure storage in the SOURCE environment and is created only by a
+    server-side process that runs when a ZIP is uploaded through the Copilot Studio UI. There is
+    no public API for it, so it cannot transfer through a solution.
 
-    A) Automated inline fix (preferred)
-       Downloads the SKILL.md from the imported type-14 child record and rewrites the parent
-       type-9 data field as an InlineAgentSkill YAML block via the Dataverse Web API.
-
-    B) Guided re-upload (fallback)
-       Packages the skill folder to a ZIP and prints step-by-step instructions for re-uploading
-       through the Copilot Studio UI.  Also opens the agent in the browser automatically.
+    This script does NOT silently rewrite the skill to inline markdown — that would let the model
+    call a "skill" that cannot execute its Python/code, degrading behavior with no warning.
+    Instead it:
+       1. Detects the broken skill(s) (data still contains bic:bundle= after import)
+       2. Rebuilds a ready-to-upload ZIP from the bundled SKILL.md + assets
+       3. Prints clear, mandatory re-upload steps and opens the agent in the browser
+       4. Pauses so you can re-upload through the CS UI (the only path that recreates the bundle)
+    The skill stays honestly broken until you complete the upload.
 
     CONNECTION WIRING MANUAL STEP
     ------------------------------
@@ -97,6 +100,27 @@ if (-not $PacExe) {
     }
 }
 INFO "pac.exe: $PacExe"
+
+# ---------------------------------------------------------------------------
+# Resolve the Power Platform environment GUID for an org URL.
+# The Copilot Studio URL needs the environment ID (a GUID), NOT the org-url host prefix
+# (e.g. "org07697283"). We map the org URL to its environment GUID via `pac env list`.
+# Returns $null if it cannot be resolved (caller falls back to a generic instruction).
+# ---------------------------------------------------------------------------
+function Resolve-EnvId {
+    param([string]$OrgUrl, [string]$PacExePath, [int]$AuthIdx)
+    try {
+        & $PacExePath auth select --index $AuthIdx | Out-Null
+        $orgHost = ([Uri]$OrgUrl).Host
+        foreach ($ln in (& $PacExePath env list 2>$null)) {
+            if ($ln -match [regex]::Escape($orgHost) -and
+                $ln -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
+                return $Matches[1]
+            }
+        }
+    } catch {}
+    return $null
+}
 
 # ---------------------------------------------------------------------------
 # Resolve bundle directory
@@ -209,7 +233,8 @@ if ($skillsWithAssets.Count -gt 0) {
         INFO "$($brokenSkills.Count) skill(s) confirmed broken (bic:bundle= token present, bundle not in target)"
     }
 
-    $envId    = $OrgNoTrail -replace "https://", "" -replace "\.crm\.dynamics\.com", ""
+    $envId    = Resolve-EnvId -OrgUrl $OrgNoTrail -PacExePath $PacExe -AuthIdx $AuthIndex
+    if (-not $envId) { $envId = $OrgNoTrail -replace "https://", "" -replace "\.crm\.dynamics\.com", "" }
     $agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$botId"
 
     Write-Host ""
@@ -293,7 +318,8 @@ if (-not (Get-Variable -Name "botId" -ErrorAction SilentlyContinue) -or -not $bo
     catch { $botId = "<could not resolve — check org URL and auth>" }
 }
 
-$envIdSummary = $OrgNoTrail -replace "https://", "" -replace "\.crm\.dynamics\.com", ""
+$envIdSummary = Resolve-EnvId -OrgUrl $OrgNoTrail -PacExePath $PacExe -AuthIdx $AuthIndex
+if (-not $envIdSummary) { $envIdSummary = $OrgNoTrail -replace "https://", "" -replace "\.crm\.dynamics\.com", "" }
 $csUrl        = "https://copilotstudio.microsoft.com/environments/$envIdSummary/agents/$botId"
 
 Write-Host ""
@@ -312,10 +338,13 @@ else {
     Write-Host "    [-] No skills-with-assets to repair" -ForegroundColor DarkGray
 }
 
-# Connection wiring instructions
+# Connection wiring instructions.
+# NOTE: the manifest key is "connectorsRequired" (written by export.ps1). Reading the wrong key
+# here previously meant this entire ACTION REQUIRED block was silently skipped, so users were
+# never told to wire connections and their flows stayed dead.
 $connectors = @()
-if ($manifest.PSObject.Properties["connectors"]) {
-    $connectors = @($manifest.connectors)
+if ($manifest.PSObject.Properties["connectorsRequired"] -and $manifest.connectorsRequired) {
+    $connectors = @($manifest.connectorsRequired)
 }
 
 if ($connectors.Count -gt 0) {

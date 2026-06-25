@@ -5,6 +5,41 @@
 
 ---
 
+## 0. Architecture decision: both paths deploy via solution import (NOT pac push)
+
+**This is the most important learning in this document.** For `cliagent-*` agents, the only
+*reliable* ways to write content into an environment are:
+
+1. **`pac solution import`** — deploys the full agent structure (bot, all tools, skills, flows,
+   knowledge, eval cases) from a solution ZIP. Reliable. Used by BOTH paths.
+2. **Dataverse Web API PATCH of `bot.configuration`** — instructions, model, AI settings.
+3. **Dataverse Web API PATCH of an existing botcomponent's `data` field** — inline-skill markdown,
+   tool/knowledge descriptions. (Tested: the local YAML from `kind:` onward maps byte-for-byte to
+   the `data` field; a PATCH persists and is the field the runtime reads.)
+
+The following pac commands are **unreliable for cliagent-* and are NOT used to deploy**:
+
+| pac command | Failure | Verdict |
+|---|---|---|
+| `pac copilot push` | Manifest-driven: deploys only the components listed in the empty-clone's `botdefinition.json`. In testing it deployed **2 of 8** components (dropped all 3 connectors + 3 skills) with no error. | Do not use to deploy |
+| `pac copilot publish` | Crashes with `System.ArgumentException` (tested twice). | Publish via CS UI (one click) |
+| `pac copilot pack` | Crashes on cliagent workspace format. | Use solution export |
+| `pac copilot pull` | Crashes (`ArgumentOutOfRangeException`). | Use clone |
+
+**Consequence for the develop/ path UX (documented at runtime + in README):**
+- Editable in VS Code and deployed: instructions, model/AI settings, inline-skill content,
+  tool/knowledge descriptions (i.e. the *wording and behaviour* of existing components).
+- Requires the Copilot Studio UI, then re-export: adding/removing tools, connectors, flows;
+  skills with Python/code; file knowledge (i.e. *new structure* or anything needing a connection
+  or binary upload).
+- Every deploy ends with a one-click **Publish** in CS (because `pac copilot publish` crashes).
+
+`pac copilot clone` is still used by develop/export.ps1 — but only to produce **editable YAML for
+reading, diffing, and code review**, never as the deploy mechanism.
+
+---
+
+
 ## 1. Identifying a Modern (cliagent-*) Agent
 
 ### The template field
@@ -223,6 +258,38 @@ Do NOT add:
 - Components from other agents (even if transitive dependencies)
 - Components whose schemaname starts with a publisher prefix not owned by this solution author
 
+### CRITICAL: solutioncomponent componenttype enum differs across platform versions
+
+`AddSolutionComponent` takes a `ComponentType` integer. **These values were renumbered between
+Dataverse platform versions.** Observed first-hand (June 2026):
+
+| Logical component | Older environment | Newer environment |
+|---|---|---|
+| Bot | 10185 | 10223 |
+| Bot Component | 10186 | 10224 |
+| Connection Reference | 10132 | 10161 |
+| Workflow | 29 | 29 (unchanged) |
+
+A script that hardcodes the older values calls `AddSolutionComponent` with `ComponentType=10186`
+on a newer environment and gets **HTTP 404**. If that error is swallowed, the surgical add does
+nothing, `pac solution export` produces a near-empty ZIP (only workflows, the one stable type),
+and the user ships a broken bundle while every console line says "OK Added N".
+
+**This was a real shipped bug.** All prior testing exported from one older-enum environment, so it
+was never caught. Reproduced cleanly: exporting from the newer environment produced a 6 KB bundle
+with zero tools/skills/config, and the script reported success.
+
+**Fixes that make the toolkit version-proof:**
+1. Try a CANDIDATE LIST of component types per logical kind (e.g. bot = `@(10185, 10223)`), stop
+   on the first that succeeds, treat an "already a component" error as success, and THROW if every
+   candidate 404s. Never swallow the error silently.
+2. After adding, run a VERIFICATION NET: count `solutioncomponents` for the solution and assert it
+   is >= (1 bot + N botcomponents + flows + connection refs). Abort loudly before export if short.
+3. After `pac solution export`, SANITY-CHECK the ZIP actually contains `bots/{schema}/bot.xml`.
+
+The verification net is the real guarantee: even if a future platform renumbers the enum again to
+a value not in the candidate list, the count check fails loudly instead of shipping an empty bundle.
+
 ---
 
 ## 6. pac copilot push known bugs (pac 2.8.1)
@@ -261,35 +328,37 @@ All Modern agent content is plain text and fully editable in VS Code:
 
 | Scenario | Recommended path |
 |---|---|
-| Distributing a sample to others | **Path 1 (solution ZIP)** — simpler, standard ALM |
-| Iterating on an agent in VS Code | **Path 2 (clone/push)** — live source control |
-| CI/CD pipeline | **Path 1 (solution ZIP)** — `pac solution import` is pipeline-safe |
-| Agent modified only in Copilot Studio UI | **Path 1** — bot.configuration is in ZIP; pac clone gets stale YAML |
-| Agent built and maintained in VS Code | **Path 2** — YAML is authoritative; skip the UI |
+| Distributing a sample to others | **distribute/** — package once, install anywhere |
+| Iterating on an agent's instructions/skills in VS Code | **develop/** — edit files, redeploy via solution import |
+| CI/CD pipeline | **distribute/** — `pac solution import` is pipeline-safe |
+| Agent modified only in Copilot Studio UI | either — both capture authoritative bot.configuration |
+| Adding new tools/connectors/flows | **Copilot Studio UI**, then re-export (no reliable CLI push) |
 
-In both paths, skills with assets require the post-import fix (detect `bic:bundle=`, rebuild ZIP, re-upload). This is automated in our install scripts.
+Both paths deploy via solution import (§0). Skills with code assets require the one-time manual
+re-upload in both paths (detect `bic:bundle=`, rebuild ZIP, upload via CS UI).
 
 
 
-## 9. Skills with assets — final resolution
+## 9. Skills with assets — final resolution (SHIPPED BEHAVIOR)
 
-AUTOMATED FIX (tested):
-After solution import or pac push, skills with bic:bundle= references can be partially
-fixed by reading the SKILL.md from the imported type-14 file component and patching
-the type-9 skill data field with inline InlineAgentSkill content.
+The shipped install scripts use **guided manual re-upload**, NOT an automated inline patch.
 
-Fix steps:
-1. Find type-9 skills where data contains bic:bundle=
-2. Get type-14 children: GET /botcomponents?filter=_parentbotcomponentid_value eq {skillId}
-3. Find the SKILL.md child (filedata_name = 'SKILL.md')
-4. Read binary: GET /botcomponents({childId})/filedata/\ → UTF-8 text
-5. PATCH /botcomponents({skillId}) with data = inline InlineAgentSkill YAML
+Rationale: an automated inline PATCH (read SKILL.md from the imported type-14 child, rewrite the
+type-9 `data` to inline InlineAgentSkill) *can* restore the instructions text, but it cannot
+restore Python/code execution (that still needs the Azure bundle blob, recreated only by the CS
+UI upload). The result is a skill that *looks* fixed and is referenced by the model but silently
+fails to run its code. We rejected that silent degradation. Instead the scripts:
 
-What is restored: skill name, description, full instructions (what agent reads)
-What is NOT restored: Python execution via Code Interpreter (requires bundle)
+1. Detect type-9 skills whose `data` still contains `bic:bundle=` after import/push
+2. Rebuild a ready-to-upload ZIP from the exported SKILL.md + assets (skills-with-assets/)
+3. Print mandatory re-upload steps, open the agent in the browser, and pause
+4. Leave the skill honestly broken until the user completes the one-time CS UI upload
 
-For production agents where Python execution is required: manual ZIP re-upload via UI.
-For sample distribution: automated fix is sufficient — instructions work correctly.
+The manual upload is the ONLY path that triggers CS's server-side process to recreate the bundle
+blob — which restores BOTH the instructions and the code execution in the target environment.
+
+(The inline-override technique is still documented in §3 as background, but it is intentionally
+not what the scripts do.)
 
 
 ## 10. File knowledge uploads (PDFs, docs) — WORKS through solution import
@@ -394,18 +463,23 @@ breaks, and what this toolkit does instead.
 | **Export bot.configuration** | Authoritative instructions, model, AI settings — these are in DV, not in the cloned YAML (YAML can be stale if agent was edited in CS UI) | Not captured by `pac copilot clone` | Exports via `GET /bots({id})` selecting the configuration field |
 | **Export skill binary assets** | SKILL.md and Python scripts from type-14 file children | Not captured by `pac copilot clone` | Downloads each file via DV file download endpoint |
 
-### develop/ path — install tasks
+### develop/ path — install tasks (solution-import based — see §0)
 
-| Task | What is needed | Default pac CLI behavior | What this toolkit does |
-|------|---------------|--------------------------|------------------------|
-| **Pre-create the bot in target** | `pac copilot push` requires the bot to pre-exist — it cannot create a new bot | Fails with "Entity 'bot' Does Not Exist" | Creates bot via `POST /api/data/v9.2/bots` |
-| **Clone empty target bot as workspace** | `pac copilot push` requires the workspace to be cloned from the TARGET environment — source workspace causes crash (botdefinition.json mismatch) | Not documented; discovered by testing | Clones the empty target bot immediately after creation |
-| **Strip source flow GUIDs** | Flow tool YAML embeds source-env-specific GUIDs (workflowId, flowId) that don't exist in target | No mechanism — push fails with "Entity 'Workflow' Does Not Exist" | Strips GUIDs before first push |
-| **First pac push** | Deploys all YAML: tools, skills, knowledge, connection references | `pac copilot push` — works once bot exists and workspace is from target | Calls `pac copilot push` |
-| **Apply authoritative bot.configuration** | pac push writes settings.mcs.yml to bot.configuration, but if the agent was edited in the CS UI the YAML is stale. Even if current, apply agent-config.json to ensure model/AI settings are correct | pac push does write bot.configuration from settings.mcs.yml — but may overwrite with stale content | `PATCH /bots({id})` with agent-config.json content after push |
-| **Create flows in target** | Target environment needs fresh workflow records with new GUIDs | No pac mechanism | `POST /api/data/v9.2/workflows` for each flow using exported workflow.json |
-| **Remap flow GUIDs + second push** | YAML needs the new target GUIDs; second push links tools to flows | No pac mechanism | Patches YAML with new GUIDs, second `pac copilot push` |
-| **Handle skills with Python/code assets** | Same problem as distribute/ — bic:bundle= token is env-specific | No pac mechanism | Same: detect broken skills, rebuild ZIP, require manual CS UI re-upload |
+The develop/ install path was redesigned (June 2026) to stop using `pac copilot push`, which
+silently dropped components (deployed 2 of 8 in testing). It now reuses the reliable distribute/
+mechanism and layers your edits on top.
+
+| Task | What is needed | Why pac push failed | What this toolkit does |
+|------|---------------|---------------------|------------------------|
+| **Deploy full structure** | bot + all tools/skills/flows/knowledge/eval cases in target | `pac copilot push` is manifest-driven and deployed only 2 of 8 components, silently | `pac solution import` of the bundle built by develop/export.ps1 (identical to distribute/) |
+| **Apply instruction/model edits** | Deploy the developer's edits to instructions + model + AI settings | pac push writes stale settings.mcs.yml | `PATCH /bots({id})` configuration from agent-config.json, with instructions.md taking precedence |
+| **Apply inline-skill / description edits** | Deploy edits to existing inline skills and tool/knowledge descriptions | No pac mechanism | For each edited `translations/*` file: strip the `mcs.metadata:` header and `PATCH` the matching botcomponent's `data` (tested: byte-for-byte match to the `data` field) |
+| **Handle skills with Python/code assets** | bic:bundle= token is env-specific | No pac mechanism | Detect, rebuild ZIP, require one-time manual CS UI re-upload |
+| **Publish** | Changes must be published to go live | `pac copilot publish` crashes (`ArgumentException`) | Open the agent and instruct the one-click Publish in the CS UI |
+
+Flow GUIDs are no longer stripped/remapped: solution import preserves them natively, exactly as in
+the distribute/ path. The old strip-and-remap-and-second-push dance was a workaround for pac push
+and is gone.
 
 ## 13. Official pac CLI gap assessment (pac 2.8.1, June 2026)
 

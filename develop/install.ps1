@@ -1,118 +1,70 @@
 <#
 .SYNOPSIS
-    Deploy a Modern Copilot Studio agent from a VS Code clone to any target environment.
+    Deploy a Modern Copilot Studio agent and apply your VS Code edits, reliably.
 
 .DESCRIPTION
-    Takes the output of path2-vscode/export.ps1 (sample/ folder + agent-config.json +
-    skills-with-assets/) and fully deploys it to a target environment.
+    Takes the output of develop/export.ps1 — a deployable bundle ZIP plus the editable files in
+    sample/ — and deploys it to a target environment WITHOUT pac copilot push (which is unreliable
+    for cliagent-* agents). Deployment uses Dataverse solution import for structure, then applies
+    your local edits via targeted Dataverse writes.
 
-    This script requires NO prior knowledge of the agent -- everything is read from
-    sample/ and agent-config.json. The target environment just needs to be accessible.
+    ─────────────────────────────────────────────────────────────────────────────
+    WHAT YOU CAN EDIT IN VS CODE (and this script deploys)
+    ─────────────────────────────────────────────────────────────────────────────
+      • Agent instructions      sample/<Agent>.instructions.md   (the system prompt / behaviour)
+      • Model + AI settings      sample/agent-config.json         (model series, content moderation…)
+      • Inline skill content     sample/<Agent>/translations/*.skill.*.mcs.yml  (markdown skills)
+      • Tool / knowledge wording sample/<Agent>/translations/*, knowledge/*      (descriptions)
 
-    WHAT THIS SCRIPT DOES (7 steps, all automated)
-    -----------------------------------------------
+      These are applied to existing components via reliable Dataverse writes.
 
-    STEP 1 -- Create agent in target Dataverse
-      pac copilot push requires the bot to pre-exist in target.
-      Error without this: "Entity 'bot' With Id = ... Does Not Exist"
-      Fix: POST /api/data/v9.2/bots with template=cliagent-1.0.0
+    ─────────────────────────────────────────────────────────────────────────────
+    WHAT YOU MUST DO IN THE COPILOT STUDIO UI (then re-run develop/export.ps1)
+    ─────────────────────────────────────────────────────────────────────────────
+      • ADD or REMOVE a tool, connector, or flow   (needs connection wiring / Power Automate)
+      • ADD a skill that runs Python / code         (needs the server-side bundle upload)
+      • ADD file knowledge (PDF, DOCX)              (needs the binary upload gateway)
 
-    STEP 2 -- Clone empty agent to get a valid workspace
-      pac copilot push requires a workspace that was cloned from the TARGET environment.
-      Using a workspace from the source env causes pac to crash parsing botdefinition.json.
-      Fix: pac copilot clone the new empty bot -- get a fresh workspace for target env.
+      These change the agent's STRUCTURE. There is no reliable CLI path to push new structural
+      components for cliagent-* agents, so build them once in Copilot Studio, then re-export to
+      bring the new structure into your bundle and local files.
 
-    STEP 3 -- Copy source YAML into workspace; strip env-specific flow GUIDs
-      Copy all YAML from sample/<AgentName>/ into the workspace.
-      Strip flowId/workflowId from tool YAMLs -- those GUIDs don't exist in target yet.
-        WorkflowTool:           translations/*.mcs.yml  workflowId: <source-guid>
-        TaskDialog (AgentFlow): actions/*.mcs.yml        flowId: <source-guid>
-      First push (step 4) creates tool botcomponents without flow links.
-
-    STEP 4 -- First pac copilot push
-      Deploys: agent settings, tool/skill botcomponents, URL knowledge, connection refs.
-      Does NOT deploy: bot.configuration (step 5) or flows (step 6).
-
-    STEP 5 -- PATCH bot.configuration
-      pac push writes settings.mcs.yml to bot.configuration, but agent-config.json
-      (exported from DV) may have newer instructions edited in the Copilot Studio UI.
-      Fix: PATCH bot.configuration from agent-config.json after push.
-      IMPORTANT: bot.configuration is stored as a STRING in Dataverse, not a JSON column.
-      The body must be: @{ configuration = $configJson } | ConvertTo-Json -Depth 1
-      This correctly string-encodes the JSON. Do NOT use string concatenation.
-
-    STEP 6 -- Create flows + remap GUIDs + second push
-      Create all flows in target via POST /api/data/v9.2/workflows using workflow.json.
-      Get the new GUIDs, patch them back into the tool YAML files.
-      Second push links each tool to its flow.
-
-    STEP 7 -- Fix skills with assets
-      After pac push, skills with bic:bundle= references are broken -- the bundle blob
-      from the source environment does not exist in target.
-      A) Automated: reads SKILL.md from skills-with-assets/ and patches the type-9 skill
-         data to an inline InlineAgentSkill. Agent works immediately with instructions.
-      B) Optional guided re-upload: rebuilds ZIP and prints steps for CS UI re-upload
-         (needed only if the skill has Python/code execution that must run).
-
-    WHAT IS NOT AUTOMATED (manual, normal platform behavior)
-    ---------------------------------------------------------
-      Connection wiring: flows stay in Draft until a human creates connections in PPAC
-      and links them to the connection references. This is standard Power Platform ALM.
+    ─────────────────────────────────────────────────────────────────────────────
+    THE ONE RUNTIME STEP THAT ALWAYS APPLIES: PUBLISH
+    ─────────────────────────────────────────────────────────────────────────────
+      Dataverse writes update the agent's authoring (draft) copy. To make changes live on
+      channels you must PUBLISH. pac copilot publish crashes for cliagent-* agents, so this is a
+      one-click step in Copilot Studio. This script opens the agent and tells you exactly where.
 
     PREREQUISITES
-    -------------
-    pac CLI:  https://aka.ms/PowerPlatformCLI
-    az CLI:   https://aka.ms/installazurecliwindows
-    pac auth: pac auth create --environment https://yourorg.crm.dynamics.com
-    az login: az login (with Dataverse write access to target env)
+    ─────────────
+    pac CLI / az CLI, pac auth + az login with access to the target environment.
 
-.PARAMETER SampleDir
-    Path to the sample/ folder from export (contains <AgentName>/ subfolder).
-    Defaults to ./sample relative to this script location.
-
-.PARAMETER AgentName
-    Display name of the agent (must match the subfolder name under SampleDir).
-
-.PARAMETER AgentSchemaName
-    Dataverse schema name (from sample/<AgentName>/settings.mcs.yml schemaName field).
-
-.PARAMETER TargetOrgUrl
-    Dataverse org URL for the target environment.
-
-.PARAMETER AuthIndex
-    pac auth index for the target environment. Defaults to 1.
-
-.PARAMETER PacExe
-    Path to pac.exe. Auto-detected from PATH or NuGet cache if not specified.
+.PARAMETER BundleZip      Path to the <Agent>-bundle.zip produced by develop/export.ps1.
+.PARAMETER SampleDir      Path to the sample/ folder with your edited files. Defaults to repo sample/.
+.PARAMETER AgentName      Display name (the sample/<AgentName>/ subfolder). Auto-detected if omitted.
+.PARAMETER TargetOrgUrl   Dataverse org URL for the target environment.
+.PARAMETER AuthIndex      pac auth index for the target environment.
+.PARAMETER PacExe         Path to pac.exe. Auto-detected if not specified.
 
 .EXAMPLE
-    .\install.ps1 `
-      -AgentName       "My Agent" `
-      -AgentSchemaName "publisher_MyAgent_xxxxx" `
-      -TargetOrgUrl    "https://myorg.crm.dynamics.com"
+    .\install.ps1 -BundleZip ..\My-Agent-bundle.zip -TargetOrgUrl https://target.crm.dynamics.com
 #>
+[CmdletBinding()]
 param(
-    [string] $SampleDir       = "",
-    [Parameter(Mandatory)][string] $AgentName,
-    [Parameter(Mandatory)][string] $AgentSchemaName,
+    [Parameter(Mandatory)][string] $BundleZip,
+    [string] $SampleDir    = "",
+    [string] $AgentName    = "",
     [Parameter(Mandatory)][string] $TargetOrgUrl,
-    [int]    $AuthIndex        = 1,
-    [string] $PacExe           = ""
+    [int]    $AuthIndex    = 1,
+    [string] $PacExe       = ""
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptDir    = Split-Path $MyInvocation.MyCommand.Path -Parent
-$RepoRoot     = Split-Path $ScriptDir -Parent
-$SampleDir    = if ($SampleDir) { $SampleDir } else { Join-Path $RepoRoot "sample" }
-$AgentDir     = Join-Path $SampleDir $AgentName
-$ConfigPath   = Join-Path $SampleDir "agent-config.json"
-$SkillsDir    = Join-Path $RepoRoot "skills-with-assets"
-$OrgNoTrail   = $TargetOrgUrl.TrimEnd("/")
-$WorkspaceDir = Join-Path $RepoRoot "_workspace_$(Get-Date -Format 'yyyyMMddHHmmss')"
-
-if (-not (Test-Path $AgentDir)) {
-    Write-Error "Agent folder not found: $AgentDir`nRun path2-vscode/export.ps1 first."
-}
+$ScriptDir  = Split-Path $MyInvocation.MyCommand.Path -Parent
+$RepoRoot   = Split-Path $ScriptDir -Parent
+$SampleDir  = if ($SampleDir) { $SampleDir } else { Join-Path $RepoRoot "sample" }
+$OrgNoTrail = $TargetOrgUrl.TrimEnd("/")
 
 if (-not $PacExe) {
     $PacExe = (Get-Command "pac" -ErrorAction SilentlyContinue)?.Source
@@ -128,290 +80,178 @@ function OK([string]$msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
 function WARN([string]$msg) { Write-Host "    !   $msg" -ForegroundColor Yellow }
 function INFO([string]$msg) { Write-Host "        $msg" -ForegroundColor DarkGray }
 
+# Resolve the Power Platform environment GUID for an org URL (for a working Copilot Studio link).
+function Resolve-EnvId {
+    param([string]$OrgUrl, [string]$PacExePath, [int]$AuthIdx)
+    try {
+        & $PacExePath auth select --index $AuthIdx | Out-Null
+        $orgHost = ([Uri]$OrgUrl).Host
+        foreach ($ln in (& $PacExePath env list 2>$null)) {
+            if ($ln -match [regex]::Escape($orgHost) -and
+                $ln -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') { return $Matches[1] }
+        }
+    } catch {}
+    return $null
+}
+
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "  Modern Agent Install -- VS Code Path" -ForegroundColor Cyan
+Write-Host "  Modern Agent Deploy -- Develop (edit) Path" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host "  Target : $OrgNoTrail"
-Write-Host "  Agent  : $AgentName ($AgentSchemaName)"
 Write-Host ""
 
-# ── Acquire DV token ──────────────────────────────────────────────────────────
-Step "Acquiring Dataverse token"
+# ── Resolve bundle ────────────────────────────────────────────────────────────
+Step "Resolving bundle + edited files"
+if (-not (Test-Path $BundleZip)) { Write-Error "BundleZip not found: $BundleZip" }
+$tempExtractDir = Join-Path ([System.IO.Path]::GetTempPath()) ("agent-bundle-" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $tempExtractDir | Out-Null
+Expand-Archive -Path $BundleZip -DestinationPath $tempExtractDir -Force
+$zipPath      = Join-Path $tempExtractDir "agent.zip"
+$manifestPath = Join-Path $tempExtractDir "manifest.json"
+if (-not (Test-Path $zipPath))      { Write-Error "agent.zip not found in bundle" }
+if (-not (Test-Path $manifestPath)) { Write-Error "manifest.json not found in bundle" }
+$manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+$agentSchema = $manifest.agentSchema
+if (-not $AgentName) { $AgentName = $manifest.agentName }
+$agentDir = Join-Path $SampleDir $AgentName
+OK "Agent: $AgentName  (schema: $agentSchema)"
+if (Test-Path $agentDir) { OK "Edited files: sample\$AgentName\" } else { WARN "sample\$AgentName\ not found -- will deploy bundle as-is (no local edits applied)" }
+
+# ── DV token ──────────────────────────────────────────────────────────────────
 $token = (az account get-access-token --resource $OrgNoTrail | ConvertFrom-Json).accessToken
-$dv = @{
-    Authorization      = "Bearer $token"
-    "OData-MaxVersion" = "4.0"
-    "OData-Version"    = "4.0"
-    Accept             = "application/json"
-    "Content-Type"     = "application/json"
-    Prefer             = "return=representation"
-}
-OK "Token acquired"
+$dv = @{ Authorization="Bearer $token"; "OData-MaxVersion"="4.0"; "OData-Version"="4.0"; Accept="application/json"; "Content-Type"="application/json"; Prefer="return=representation" }
+$dvBase = "$OrgNoTrail/api/data/v9.2"
 
+# ── Step 1: Solution import (reliable structure) ─────────────────────────────
+Step "Step 1 -- Import agent structure (pac solution import)"
+INFO "Reliable path: imports bot, all tools/skills/flows/knowledge/eval cases. No pac push."
 & $PacExe auth select --index $AuthIndex | Out-Null
+& $PacExe solution import --path $zipPath --environment $OrgNoTrail 2>&1 | ForEach-Object { INFO $_ }
+if ($LASTEXITCODE -ne 0) { Write-Error "pac solution import failed" }
+OK "Solution imported"
 
-# ── Step 1: Create agent in target Dataverse ──────────────────────────────────
-Step "Step 1 -- Create agent in target Dataverse (prerequisite for pac push)"
-$newBotId = $null
-$existing = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/bots?`$filter=schemaname eq '$AgentSchemaName'&`$select=botid,name" -Headers $dv).value
-if ($existing.Count -gt 0) {
-    $newBotId = $existing[0].botid
-    WARN "Agent already exists: $newBotId -- skipping creation"
-} else {
-    $b = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/bots" -Method POST -Headers $dv -Body (@{
-        name = $AgentName; schemaname = $AgentSchemaName
-        template = "cliagent-1.0.0"; language = 1033; authenticationmode = 1
-    } | ConvertTo-Json)
-    $newBotId = $b.botid
-    OK "Bot created: $newBotId"
-}
+# Locate the imported bot
+$bot = (Invoke-RestMethod -Uri "$dvBase/bots?`$filter=schemaname eq '$agentSchema'&`$select=botid,name" -Headers $dv).value | Select-Object -First 1
+if (-not $bot) { Write-Error "Imported bot not found (schema $agentSchema)" }
+$botId = $bot.botid
+OK "Bot: $($bot.name) ($botId)"
 
-# ── Step 2: Clone empty agent to get valid workspace ─────────────────────────
-Step "Step 2 -- Clone empty agent from target env (get valid pac push workspace)"
-INFO "Workspace must be cloned from TARGET env -- source env workspace causes pac crashes"
-New-Item -ItemType Directory -Force -Path $WorkspaceDir | Out-Null
-& $PacExe copilot clone --environment $OrgNoTrail --bot $newBotId --display-name $AgentName --output-dir $WorkspaceDir 2>&1 | ForEach-Object { INFO $_ }
-if ($LASTEXITCODE -ne 0) { Write-Error "pac copilot clone failed" }
-$ws = Join-Path $WorkspaceDir $AgentName
-OK "Workspace: $ws"
-
-# ── Step 3: Copy source YAML; strip env-specific flow GUIDs ──────────────────
-Step "Step 3 -- Copy source YAML; strip flow GUIDs from tool files"
-INFO "Flow GUIDs (flowId/workflowId) in source YAML are env-specific."
-INFO "Stripping before push; will remap after creating flows in Step 6."
-
-foreach ($f in @("agent.mcs.yml","settings.mcs.yml","connectionreferences.mcs.yml","icon.png")) {
-    $src = Join-Path $AgentDir $f
-    if (Test-Path $src) { Copy-Item $src (Join-Path $ws $f) -Force }
-}
-foreach ($d in @("knowledge","translations","workflows","actions")) {
-    $src = Join-Path $AgentDir $d
-    if (Test-Path $src) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $ws $d) | Out-Null
-        Copy-Item (Join-Path $src "*") (Join-Path $ws $d) -Recurse -Force
+# ── Step 2: Apply instruction / model / AI-settings edits (bot.configuration) ─
+Step "Step 2 -- Apply your instruction + model edits (bot.configuration)"
+$configPath = Join-Path $SampleDir "agent-config.json"
+$instrPath  = Join-Path $SampleDir "$AgentName.instructions.md"
+if (Test-Path $configPath) {
+    $cfgJson = Get-Content $configPath -Raw
+    $cfgObj  = $cfgJson | ConvertFrom-Json
+    # instructions.md is the friendly edit surface — if present, it wins over agent-config.json.
+    if (Test-Path $instrPath) {
+        $md = (Get-Content $instrPath -Raw) -replace '(?m)^\s*<!--.*?-->\s*$', ''   # drop helper comment lines
+        $md = $md.Trim()
+        if ($md -and $cfgObj.agentSettings.instructions.segments.Count -gt 0) {
+            $cfgObj.agentSettings.instructions.segments[0].value = $md
+            $cfgJson = $cfgObj | ConvertTo-Json -Depth 50
+            INFO "Instructions taken from $AgentName.instructions.md ($($md.Length) chars)"
+        }
     }
-}
-
-# Strip WorkflowTool workflowId (translations/*.mcs.yml)
-$strippedWorkflow = @{}
-Get-ChildItem (Join-Path $ws "translations") -Filter "*.mcs.yml" -ErrorAction SilentlyContinue | ForEach-Object {
-    $c = Get-Content $_.FullName -Raw
-    if ($c -match "kind: WorkflowTool" -and $c -match "(?m)^workflowId: ([a-f0-9\-]{36})") {
-        $strippedWorkflow[$_.Name] = $Matches[1]
-        Set-Content $_.FullName ($c -replace "(?m)^workflowId: [a-f0-9\-]+\r?\n","") -Encoding UTF8 -NoNewline
-        INFO "  WorkflowTool '$($_.BaseName)' -- stripped workflowId $($Matches[1])"
-    }
-}
-
-# Strip TaskDialog flowId (actions/*.mcs.yml)
-$strippedFlow = @{}
-Get-ChildItem (Join-Path $ws "actions") -Filter "*.mcs.yml" -ErrorAction SilentlyContinue | ForEach-Object {
-    $c = Get-Content $_.FullName -Raw
-    if ($c -match "kind: InvokeFlowTaskAction" -and $c -match "(?m)^  flowId: ([a-f0-9\-]{36})") {
-        $strippedFlow[$_.Name] = $Matches[1]
-        Set-Content $_.FullName ($c -replace "(?m)^  flowId: [a-f0-9\-]+\r?\n","") -Encoding UTF8 -NoNewline
-        INFO "  AgentFlow '$($_.BaseName)' -- stripped flowId $($Matches[1])"
-    }
-}
-OK "YAML copied; $($strippedWorkflow.Count + $strippedFlow.Count) flow GUID(s) stripped"
-
-# ── Step 4: First pac push ────────────────────────────────────────────────────
-Step "Step 4 -- First pac push (agent settings, tools, skills, knowledge, connection refs)"
-INFO "Flow GUIDs were stripped -- push creates tool botcomponents without flow links."
-INFO "NOTE: pac push 2.8.1 crashes in its post-push reader for cliagent-* agents but still"
-INFO "deploys content. Exit code 0 = writes completed. We verify via DV API, not pac output."
-& $PacExe copilot push --project-dir $ws 2>&1 | ForEach-Object { INFO $_ }
-if ($LASTEXITCODE -ne 0) {
-    WARN "pac push exit $LASTEXITCODE -- checking DV directly to confirm what deployed"
-}
-
-# Verify push via DV API — pac's post-push reader crashes and cannot confirm deployment
-$pushComps = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotid_value eq '$newBotId' and componenttype eq 9&`$select=name,data&`$top=20" -Headers $dv).value
-if ($pushComps.Count -gt 0) {
-    OK "First push verified via DV: $($pushComps.Count) type-9 components deployed"
-    $pushComps | ForEach-Object { INFO "  $($_.name)" }
-} else {
-    Write-Error "First push FAILED — no botcomponents found in target DV. Cannot continue."
-}
-
-# ── Step 5: PATCH bot.configuration ──────────────────────────────────────────
-Step "Step 5 -- Patch bot.configuration (authoritative instructions + model)"
-INFO "pac push writes settings.mcs.yml to bot.configuration."
-INFO "Overwriting with agent-config.json (instructions as of export time)."
-if (Test-Path $ConfigPath) {
-    $cfgJson = Get-Content $ConfigPath -Raw
-    # IMPORTANT: bot.configuration is a STRING field in Dataverse, not a JSON column.
-    # ConvertTo-Json -Depth 1 correctly string-encodes the JSON value.
+    # bot.configuration is a STRING field in Dataverse — ConvertTo-Json -Depth 1 string-encodes it.
     $body = @{ configuration = $cfgJson } | ConvertTo-Json -Depth 1
-    Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/bots($newBotId)" -Method PATCH -Headers $dv -Body $body | Out-Null
-    $cfgObj = $cfgJson | ConvertFrom-Json
-    OK "bot.configuration patched"
-    INFO "  Model       : $($cfgObj.agentSettings.model.series)"
-    INFO "  Instructions: $($cfgObj.agentSettings.instructions.segments[0].value.Length) chars"
+    Invoke-RestMethod -Uri "$dvBase/bots($botId)" -Method PATCH -Headers $dv -Body $body | Out-Null
+    OK "bot.configuration applied (model: $($cfgObj.agentSettings.model.series))"
 } else {
-    WARN "agent-config.json not found -- instructions not patched."
-    WARN "Run path2-vscode/export.ps1 to capture bot.configuration."
+    INFO "No agent-config.json -- keeping instructions/model from the imported bundle"
 }
 
-# ── Step 6: Create flows; remap GUIDs; second push ───────────────────────────
-Step "Step 6 -- Create flows in target; remap GUIDs; second pac push"
-$wfDirs = @(Get-ChildItem (Join-Path $ws "workflows") -Directory -ErrorAction SilentlyContinue)
-if ($wfDirs.Count -eq 0) {
-    INFO "No workflows found -- skipping"
-} else {
-    $guidMap = @{}  # sourceGuid -> newGuid
+# ── Step 3: Apply inline-skill + description edits (existing component data) ──
+Step "Step 3 -- Apply your skill / description edits (component data)"
+$translDir = Join-Path $agentDir "translations"
+$patched = 0; $skippedAssets = 0
+if (Test-Path $translDir) {
+    # Map target components by name for matching.
+    $targetComps = (Invoke-RestMethod -Uri "$dvBase/botcomponents?`$filter=_parentbotid_value eq '$botId' and componenttype eq 9&`$select=botcomponentid,name,data" -Headers $dv).value
+    foreach ($file in (Get-ChildItem $translDir -Filter "*.mcs.yml")) {
+        $raw = Get-Content $file.FullName -Raw
+        $name = if ($raw -match "(?m)^\s*componentName:\s*(.+)$") { $Matches[1].Trim().Trim('"') } else { $null }
+        $idx  = $raw.IndexOf("kind:")
+        if (-not $name -or $idx -lt 0) { continue }
+        $localData = $raw.Substring($idx).TrimEnd()
+        # Skills with code assets carry a bic:bundle= pointer — those are handled by manual upload
+        # (Step 4), not by a data patch. Skip them here.
+        if ($localData -match "bic:bundle=") { $skippedAssets++; continue }
+        $tc = $targetComps | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        if (-not $tc) { continue }
+        if (($tc.data ?? "").TrimEnd() -eq $localData) { continue }   # unchanged — no write
+        Invoke-RestMethod -Uri "$dvBase/botcomponents($($tc.botcomponentid))" -Method PATCH -Headers $dv -Body (@{ data = $localData } | ConvertTo-Json -Depth 1) | Out-Null
+        OK "  Updated '$name'"
+        $patched++
+    }
+}
+if ($patched -eq 0) { INFO "No inline component edits to apply (everything matches the bundle)" }
+if ($skippedAssets -gt 0) { INFO "$skippedAssets code-asset skill(s) handled in Step 4, not here" }
 
-    foreach ($wfDir in $wfDirs) {
-        $metaFile = Join-Path $wfDir.FullName "metadata.yml"
-        $wfFile   = Join-Path $wfDir.FullName "workflow.json"
-        if (-not (Test-Path $metaFile) -or -not (Test-Path $wfFile)) { continue }
+# ── Step 4: Skills with code assets — manual re-upload ───────────────────────
+$skillsWithAssets = @()
+if ($manifest.PSObject.Properties["skillsWithAssets"]) { $skillsWithAssets = @($manifest.skillsWithAssets) }
+$envId = Resolve-EnvId -OrgUrl $OrgNoTrail -PacExePath $PacExe -AuthIdx $AuthIndex
+if (-not $envId) { $envId = $OrgNoTrail -replace "https://","" -replace "\.crm\.dynamics\.com","" }
+$agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$botId"
 
-        $meta     = Get-Content $metaFile -Raw
-        $wfJson   = Get-Content $wfFile -Raw
-        $flowName = if ($meta -match "(?m)^name: (.+)") { $Matches[1].Trim() } else { $wfDir.Name }
-        $newGuid  = [Guid]::NewGuid().ToString()
-
-        try {
-            Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/workflows" -Method POST -Headers $dv -Body (@{
-                workflowid = $newGuid; name = $flowName
-                category = 5; type = 1; primaryentity = "none"
-                statecode = 0; statuscode = 1; clientdata = $wfJson
-            } | ConvertTo-Json -Depth 3) | Out-Null
-
-            # Map source GUID (from workflow dir name) to new GUID
-            if ($wfDir.Name -match "([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$") {
-                $guidMap[$Matches[1]] = $newGuid
-            }
-            OK "  Flow '$flowName' -- $newGuid"
-        } catch {
-            WARN "  Flow '$flowName' failed: $($_.Exception.Message)"
+if ($skillsWithAssets.Count -gt 0) {
+    Step "Step 4 -- Skills with code assets need a one-time manual upload ($($skillsWithAssets.Count))"
+    $skillSrcRoot = Join-Path $tempExtractDir "skills-with-assets"
+    $reupload = @()
+    foreach ($s in $skillsWithAssets) {
+        $sName = if ($s.PSObject.Properties["skill"]) { $s.skill } else { $s }
+        $sDir  = Join-Path $skillSrcRoot $sName
+        if (Test-Path $sDir) {
+            $zp = Join-Path (Split-Path (Resolve-Path $BundleZip).Path -Parent) "$sName-skill.zip"
+            if (Test-Path $zp) { Remove-Item $zp -Force }
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $z = [System.IO.Compression.ZipFile]::Open($zp,'Create')
+            try { Get-ChildItem $sDir -File | ForEach-Object { [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($z,$_.FullName,$_.Name)|Out-Null } } finally { $z.Dispose() }
+            $reupload += @{ name=$sName; zip=$zp }
+            OK "  Ready to upload: $zp"
         }
     }
-
-    # Patch WorkflowTool files with new GUIDs
-    foreach ($fn in $strippedWorkflow.Keys) {
-        $srcGuid = $strippedWorkflow[$fn]; $newGuid = $guidMap[$srcGuid]
-        if (-not $newGuid) { WARN "No new GUID for WorkflowTool '$fn'"; continue }
-        $fp = Join-Path $ws "translations\$fn"
-        Set-Content $fp ((Get-Content $fp -Raw) -replace "kind: WorkflowTool", "kind: WorkflowTool`nworkflowId: $newGuid") -Encoding UTF8 -NoNewline
-        OK "  WorkflowTool '$fn' -- $newGuid"
-    }
-
-    # Patch AgentFlow files with new GUIDs
-    foreach ($fn in $strippedFlow.Keys) {
-        $srcGuid = $strippedFlow[$fn]; $newGuid = $guidMap[$srcGuid]
-        if (-not $newGuid) { WARN "No new GUID for AgentFlow '$fn'"; continue }
-        $fp = Join-Path $ws "actions\$fn"
-        Set-Content $fp ((Get-Content $fp -Raw) -replace "kind: InvokeFlowTaskAction", "kind: InvokeFlowTaskAction`n  flowId: $newGuid") -Encoding UTF8 -NoNewline
-        OK "  AgentFlow '$fn' -- $newGuid"
-    }
-
-    INFO "Re-pushing with remapped flow GUIDs..."
-    & $PacExe copilot push --project-dir $ws 2>&1 | ForEach-Object { INFO $_ }
-    if ($LASTEXITCODE -ne 0) { WARN "pac push exit $LASTEXITCODE -- verifying via DV API" }
-
-    # Verify flow links via DV API — pac's post-push reader crashes and cannot confirm
-    $linkedOk = $true
-    foreach ($fid in $guidMap.Values) {
-        try {
-            $wf = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/workflows($fid)?`$select=workflowid,name" -Headers $dv
-            OK "  Second push verified: flow '$($wf.name)' linked ($fid)"
-        } catch {
-            WARN "  Flow $fid not found in DV after second push"
-            $linkedOk = $false
-        }
-    }
-    if ($linkedOk) { OK "Second push verified via DV -- tools linked to flows" }
-    else { WARN "Some flows may not have linked correctly -- verify agent in Copilot Studio" }
+    Write-Host ""
+    Write-Host "  These skills run Python/code. The code bundle is created only by uploading the" -ForegroundColor Yellow
+    Write-Host "  ZIP through the Copilot Studio UI (no API exists). Until then the skill is empty." -ForegroundColor Yellow
+    Write-Host "  For each skill: open the agent > click the skill > three-dot menu > Replace/Edit > upload the ZIP > Save." -ForegroundColor White
 }
 
-# -- Step 7: Skills with assets require manual upload
-# Skills-with-assets have a bic:bundle= token in their type-9 record pointing to
-# Azure blob storage in the source environment. This does not transfer.
-# We do NOT silently convert to inline instructions -- that would allow the model
-# to call a skill that cannot execute Python, causing silent degradation.
-# Instead: detect broken skills, rebuild the ZIP, require manual re-upload.
-if (Test-Path $SkillsDir) {
-    $skillFolders = @(Get-ChildItem $SkillsDir -Directory -ErrorAction SilentlyContinue)
-    if ($skillFolders.Count -gt 0) {
-        Step "Step 7 -- Skills with assets require manual upload ($($skillFolders.Count) skill(s))"
-
-        $allComps     = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/botcomponents?`$filter=_parentbotid_value eq '$newBotId' and componenttype eq 9&`$select=botcomponentid,name,data" -Headers $dv).value
-        $brokenSkills = @($allComps | Where-Object { $_.data -like "*bic:bundle=*" })
-        INFO "$($brokenSkills.Count) skill(s) confirmed broken (bic:bundle= token — bundle not in target)"
-
-        $reuploadList = @()
-        foreach ($sf in $skillFolders) {
-            $zipPath = Join-Path $SkillsDir "$($sf.Name).zip"
-            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-            Compress-Archive -Path (Join-Path $sf.FullName "*") -DestinationPath $zipPath -Force
-            $reuploadList += @{ name = $sf.Name; zipPath = $zipPath }
-            OK "  Built ZIP: $zipPath"
-        }
-
-        $envId    = $OrgNoTrail -replace "https://","" -replace "\.crm\.dynamics\.com",""
-        $agentUrl = "https://copilotstudio.microsoft.com/environments/$envId/agents/$newBotId"
-
-        Write-Host ""
-        Write-Host "  ==========================================================" -ForegroundColor Red
-        Write-Host "  ACTION REQUIRED: Skills with code assets need manual upload" -ForegroundColor Red
-        Write-Host "  ==========================================================" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "  The following skill(s) have Python or binary assets that cannot" -ForegroundColor Yellow
-        Write-Host "  be transferred automatically. The agent is NOT fully functional" -ForegroundColor Yellow
-        Write-Host "  until you upload the ZIPs below." -ForegroundColor Yellow
-        Write-Host ""
-        foreach ($r in $reuploadList) {
-            Write-Host "  Skill : $($r.name)" -ForegroundColor White
-            Write-Host "  ZIP   : $($r.zipPath)" -ForegroundColor White
-            Write-Host ""
-        }
-        Write-Host "  Steps (repeat for each skill above):" -ForegroundColor Cyan
-        Write-Host "    1. Open your agent: $agentUrl" -ForegroundColor White
-        Write-Host "    2. In the right panel, click the skill name." -ForegroundColor White
-        Write-Host "    3. Three-dot menu > Replace / Edit skill." -ForegroundColor White
-        Write-Host "    4. Upload the ZIP file shown above for that skill." -ForegroundColor White
-        Write-Host "    5. Save the agent." -ForegroundColor White
-        Write-Host ""
-        try { Start-Process $agentUrl; INFO "Opening agent in browser..." }
-        catch { WARN "Open manually: $agentUrl" }
-
-        Write-Host ""
-        WARN "Agent is NOT fully functional until skills are uploaded."
-        Write-Host "  Press Enter when you have uploaded all skills and saved, or Ctrl+C to finish now." -ForegroundColor Yellow
-        Read-Host | Out-Null
-        OK "Continuing."
-    } else {
-        Step "Step 7 -- No skills-with-assets (skipping)"
-        OK "Nothing to repair"
-    }
-} else {
-    Step "Step 7 -- No skills-with-assets folder found (skipping)"
-    OK "Nothing to repair"
+# ── Step 5: Connection wiring (if connectors present) ────────────────────────
+$connectors = @()
+if ($manifest.PSObject.Properties["connectorsRequired"] -and $manifest.connectorsRequired) { $connectors = @($manifest.connectorsRequired) }
+if ($connectors.Count -gt 0) {
+    Step "Step 5 -- Wire connections (one-time per environment)"
+    Write-Host "    Connector(s) used by this agent's flows:" -ForegroundColor Yellow
+    $connectors | ForEach-Object { Write-Host "      - $_" -ForegroundColor White }
+    Write-Host "    In https://make.powerautomate.com (your target env): open each flow, assign a" -ForegroundColor White
+    Write-Host "    connection per connector, save and turn it on." -ForegroundColor White
 }
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-$flowCount = $strippedWorkflow.Count + $strippedFlow.Count
-$envId     = $OrgNoTrail -replace "https://","" -replace "\.crm\.dynamics\.com",""
+# ── Step 6: PUBLISH (the one runtime step that always applies) ────────────────
+Step "Step 6 -- Publish to make your changes live (one click)"
+Write-Host "  Your edits are saved to the agent's authoring copy. To go live you must PUBLISH." -ForegroundColor Yellow
+Write-Host "  (pac copilot publish crashes for cliagent-* agents, so this is a one-click UI step.)" -ForegroundColor DarkGray
+Write-Host "    1. Open: $agentUrl" -ForegroundColor White
+Write-Host "    2. Click 'Publish' (top-right) and confirm." -ForegroundColor White
+try { Start-Process $agentUrl; INFO "Opening agent in browser..." } catch { WARN "Open manually: $agentUrl" }
+
+# ── Cleanup + summary ─────────────────────────────────────────────────────────
+if (Test-Path $tempExtractDir) { Remove-Item $tempExtractDir -Recurse -Force }
 
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "  Install Complete" -ForegroundColor Cyan
+Write-Host "  Deploy Complete" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host "  Agent : $($bot.name) ($botId)"
+Write-Host "  URL   : $agentUrl" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Bot ID : $newBotId"
-Write-Host "  URL    : https://copilotstudio.microsoft.com/environments/$envId/agents/$newBotId" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Steps completed:"
-Write-Host "    [x] Agent created in Dataverse"
-Write-Host "    [x] YAML pushed (tools, skills, knowledge, connection refs)"
-Write-Host "    [x] bot.configuration patched (instructions + model)"
-Write-Host "    [x] $flowCount flow(s) created and linked"
-Write-Host ""
-Write-Host "  ACTION REQUIRED: Wire connections in PPAC to activate flows" -ForegroundColor Yellow
-Write-Host "    1. Open https://make.powerautomate.com"
-Write-Host "    2. Switch to your target environment"
-Write-Host "    3. Open each flow, assign a connection per connector, save and turn on"
-Write-Host ""
-Write-Host "  Workspace (debug, delete when done): $WorkspaceDir" -ForegroundColor DarkGray
+Write-Host "  Applied:"
+Write-Host "    [x] Structure imported (tools, skills, flows, knowledge, eval cases)"
+Write-Host "    [x] Instructions + model/AI settings"
+if ($patched -gt 0) { Write-Host "    [x] $patched inline component edit(s)" } else { Write-Host "    [-] No inline component edits" }
+if ($skillsWithAssets.Count -gt 0) { Write-Host "    [!] $($skillsWithAssets.Count) code-asset skill(s): upload ZIP in CS (Step 4)" -ForegroundColor Yellow }
+if ($connectors.Count -gt 0)       { Write-Host "    [!] Wire connection(s) in Power Automate (Step 5)" -ForegroundColor Yellow }
+Write-Host "    [>] PUBLISH in Copilot Studio to go live (Step 6)" -ForegroundColor Yellow
