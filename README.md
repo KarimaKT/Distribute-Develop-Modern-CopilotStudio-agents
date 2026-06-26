@@ -22,8 +22,10 @@ Microsoft's built-in solution export/import and the VS Code Power Platform exten
 | **Azure CLI** (`az`) | https://aka.ms/installazurecliwindows |
 | **Signed in** | `pac auth create --environment https://yourorg.crm.dynamics.com` and `az login`, both pointing at your environment |
 
-You'll also need your agent's **ID** — the GUID in its Copilot Studio web address:
-`https://copilotstudio.microsoft.com/environments/{env}/agents/{this-is-the-agent-id}`
+You'll also need to point the script at your agent — either by its **name** or its **id**:
+- **By name** (easiest): pass `-AgentName "My Agent"` and the script finds it for you.
+- **By id**: pass `-BotId` with the GUID from the agent's Copilot Studio web address
+  (`.../agents/{this-is-the-agent-id}`).
 
 ---
 
@@ -34,9 +36,9 @@ You'll also need your agent's **ID** — the GUID in its Copilot Studio web addr
 ```powershell
 .\distribute\export.ps1 `
   -SourceOrgUrl  "https://yourorg.crm.dynamics.com" `
-  -BotId         "your-agent-id" `
+  -AgentName     "My Agent" `        # or use -BotId "your-agent-id"
   -SolutionName  "MyAgentSample" `
-  -PublisherName "yourprefix"      # your publisher prefix (e.g. "cr1a2") or its unique name
+  -PublisherName "yourprefix"        # your publisher prefix (e.g. "cr1a2") or its unique name
 ```
 
 You get **one file**: `MyAgent-bundle.zip`. Share it, commit it, or email it.
@@ -90,8 +92,7 @@ Want to change an agent and push the change? The **develop** path clones the age
 # 1. Clone to editable files + build the deployable bundle
 .\develop\export.ps1 `
   -SourceOrgUrl  "https://yourorg.crm.dynamics.com" `
-  -BotId         "your-agent-id" `
-  -AgentName     "My Agent" `
+  -AgentName     "My Agent" `        # finds the agent by name (or add -BotId "your-agent-id")
   -SolutionName  "MyAgentSample" `
   -PublisherName "yourprefix"
 

@@ -93,6 +93,21 @@ shipping someone else's full dataset. Makers can add their own data afterward.
 
 **Assumptions:** A8 (below). **Decision:** D9 (below). **Backlog U1 is now resolved by this.**
 
+### 4.7 Identify the agent by name OR id (low-code friendly)
+Makers often don't know what a GUID is. Both **export** scripts accept the agent's **display name**
+as an alternative to its id:
+- `distribute/export.ps1` and `develop/export.ps1` take `-BotId` (optional) and `-AgentName`.
+- If `-BotId` is given, it is used as-is.
+- Else the script resolves `-AgentName` among the source environment's **modern** agents:
+  - **exactly one match** → use it (print which id was chosen);
+  - **no match** → error listing the available modern agent names;
+  - **more than one match** → if interactive, show a numbered pick list (name + id + last modified)
+    and let the maker choose; if non-interactive, error and list the matching ids so they can pass
+    `-BotId`.
+- Name match is case-insensitive and exact on display name. (`develop/export.ps1` already uses
+  `-AgentName` as the local folder name; it now doubles as the resolver.)
+**Decision:** D10. **Backlog U2 resolved by this.**
+
 ### 4.6 (was 4.5) the rest of the path behaviors continue below
 
 
@@ -237,6 +252,9 @@ Any **R** row must be converted to **T** (or corrected) when a suitable test age
 - D9. **Self-contained samples auto-bundle custom table dependencies** (definition + 1 seed row) so
   a table-backed agent installs and works with one command. Only custom tables; system tables are
   never bundled. Seed insert is best-effort/non-fatal. (2026-06-26)
+- D10. **Export accepts an agent by name** (`-AgentName`) as an alternative to `-BotId`, resolving
+  among modern agents with an interactive pick when ambiguous. Removes the "find the GUID" friction
+  for low-code makers. (2026-06-26)
 
 ---
 
@@ -268,7 +286,8 @@ Any **R** row must be converted to **T** (or corrected) when a suitable test age
 - U1. ~~Self-contained samples for table-backed agents.~~ **RESOLVED (§4.5, D9):** export now
   auto-bundles each custom table's definition + 1 seed row; install recreates the table and seeds
   one row if empty. (System tables are never bundled; seed insert is best-effort.)
-- U2. Auto-detect the agent id / offer a picker, so makers don't hunt for the GUID.
+- U2. ~~Auto-detect the agent id / offer a picker.~~ **RESOLVED (§4.7, D10):** export accepts
+  `-AgentName` and resolves the id among modern agents, with an interactive pick when ambiguous.
 - U3. Optional `-WhatIf` dry run for both installs.
 - U4. Multi-agent export (whole environment).
 - U5. Convert all **R** rows in §5 to **T** with purpose-built test agents.
@@ -301,3 +320,8 @@ Keep this section updated as evidence is added or invalidated.
   exports cleanly (bot.xml present, 0 components) and installs via `-BundleDir`.
 - `-BundleDir` install path (extracted folder, not zip): verified end-to-end.
 - Table+seed feature works through the **develop** path too (it reuses distribute export).
+
+**U2 — resolve agent by name (2026-06-26):** unit-tested the resolver (unique → id; none → errors
+listing available modern agents; ambiguous non-interactive → errors listing candidate ids). Real
+end-to-end: exported "Fabric Analyst" with `-AgentName` (no `-BotId`) → resolved + full export;
+a nonexistent name errors with the available-agents list. `-BotId` path unaffected (all prior tests).

@@ -54,12 +54,18 @@
 
 .PARAMETER BotId
     Dataverse bot GUID (find in Copilot Studio → agent URL, or Settings → Details).
+    Optional — provide this OR -AgentName. If omitted, the agent is found by -AgentName.
+
+.PARAMETER AgentName
+    The agent's display name. Used to look up the agent when -BotId is not given (a friendly
+    alternative to hunting for the GUID). If several modern agents share the name, you'll be asked
+    to choose (or, non-interactively, given their ids to pass via -BotId).
 
 .PARAMETER SolutionName
     Unique name for the distribution solution (created if it doesn't exist).
 
 .PARAMETER PublisherName
-    Publisher unique name for the distribution solution.
+    Publisher unique name OR customization prefix for the distribution solution.
 
 .PARAMETER OutputDir
     Folder where agent.zip, skills-with-assets/, and manifest.json will be written.
@@ -72,6 +78,12 @@
     Path to pac.exe. Auto-detected from PATH or NuGet cache if not specified.
 
 .EXAMPLE
+    # By name (low-code friendly — no GUID needed)
+    .\export.ps1 -SourceOrgUrl "https://myorg.crm.dynamics.com" `
+      -AgentName "My Agent" -SolutionName "MyAgentSample" -PublisherName "myprefix"
+
+.EXAMPLE
+    # By id
     .\export.ps1 `
       -SourceOrgUrl "https://myorg.crm.dynamics.com" `
       -BotId        "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" `
@@ -80,7 +92,8 @@
 #>
 param(
     [Parameter(Mandatory)][string] $SourceOrgUrl,
-    [Parameter(Mandatory)][string] $BotId,
+    [string] $BotId      = "",
+    [string] $AgentName  = "",
     [Parameter(Mandatory)][string] $SolutionName,
     [Parameter(Mandatory)][string] $PublisherName,
     [string] $OutputDir  = ".",
@@ -92,6 +105,10 @@ $ErrorActionPreference = "Stop"
 $OrgNoTrail = $SourceOrgUrl.TrimEnd("/")
 # Resolve to absolute path — [System.IO.File]::WriteAllBytes requires absolute paths
 $OutputDir  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDir)
+
+if (-not $BotId -and -not $AgentName) {
+    Write-Error "Provide either -BotId (the agent's id) or -AgentName (its display name). With -AgentName the script finds the id for you."
+}
 
 # Resolve pac.exe
 if (-not $PacExe) {
@@ -108,12 +125,41 @@ function OK([string]$msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
 function WARN([string]$msg) { Write-Host "    !   $msg" -ForegroundColor Yellow }
 function INFO([string]$msg) { Write-Host "        $msg" -ForegroundColor DarkGray }
 
+# Resolve a modern (cliagent-*) agent's BotId from its display name, in the given environment.
+# One match -> returns the id. None -> errors with the available names. Many -> interactive pick
+# (or, when non-interactive, errors listing the candidates so the caller can pass -BotId).
+function Resolve-BotIdByName {
+    param([string]$Name, [string]$OrgUrl, [hashtable]$Headers)
+    $enc = [uri]::EscapeDataString($Name)
+    $found = @((Invoke-RestMethod -Uri "$OrgUrl/api/data/v9.2/bots?`$filter=name eq '$enc'&`$select=botid,name,schemaname,template,modifiedon" -Headers $Headers).value | Where-Object { $_.template -like "cliagent-*" })
+    if ($found.Count -eq 1) { return $found[0].botid }
+    if ($found.Count -eq 0) {
+        $all = @((Invoke-RestMethod -Uri "$OrgUrl/api/data/v9.2/bots?`$select=name,template&`$orderby=name" -Headers $Headers).value | Where-Object { $_.template -like "cliagent-*" })
+        Write-Host "  No modern agent named '$Name' in this environment. Available modern agents:" -ForegroundColor Yellow
+        $all | ForEach-Object { Write-Host "    - $($_.name)" -ForegroundColor White }
+        Write-Error "Agent '$Name' not found. Use one of the names above (exact), or pass -BotId."
+    }
+    # More than one with the same display name — disambiguate.
+    if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        Write-Host "  Multiple modern agents named '$Name'. Choose one:" -ForegroundColor Yellow
+        for ($i = 0; $i -lt $found.Count; $i++) {
+            Write-Host ("    [{0}] {1}  (id {2}, modified {3})" -f ($i+1), $found[$i].name, $found[$i].botid, $found[$i].modifiedon) -ForegroundColor White
+        }
+        $pick = Read-Host "  Enter number (1-$($found.Count))"
+        $idx = 0
+        if ([int]::TryParse($pick, [ref]$idx) -and $idx -ge 1 -and $idx -le $found.Count) { return $found[$idx-1].botid }
+        Write-Error "Invalid selection."
+    }
+    Write-Host "  Multiple modern agents named '$Name'. Pass one of these with -BotId:" -ForegroundColor Yellow
+    $found | ForEach-Object { Write-Host "    $($_.botid)  (modified $($_.modifiedon))" -ForegroundColor White }
+    Write-Error "Ambiguous agent name '$Name'. Re-run with -BotId."
+}
+
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "║  Modern Agent Export — Solution Path     ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host "  Source : $OrgNoTrail"
-Write-Host "  BotId  : $BotId"
 Write-Host "  Solution: $SolutionName"
 Write-Host ""
 
@@ -122,6 +168,13 @@ Step "Acquiring Dataverse token..."
 $token = (az account get-access-token --resource $OrgNoTrail | ConvertFrom-Json).accessToken
 $dv = @{ Authorization="Bearer $token"; "OData-MaxVersion"="4.0"; "OData-Version"="4.0"; Accept="application/json"; "Content-Type"="application/json" }
 OK "Token acquired"
+
+# Resolve agent by name if no id was given.
+if (-not $BotId) {
+    Step "Finding agent '$AgentName' by name"
+    $BotId = Resolve-BotIdByName -Name $AgentName -OrgUrl $OrgNoTrail -Headers $dv
+    OK "Resolved to BotId $BotId"
+}
 
 # ── Step 1: Validate Modern agent ─────────────────────────────────────────────
 Step "Step 1 — Validate Modern Copilot Studio agent (cliagent-* template)"
