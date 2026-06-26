@@ -2,13 +2,27 @@
 
 This toolkit is a starting point for the community. Contributions welcome!
 
+## Read the spec first
+
+[`SPEC.md`](SPEC.md) is the **source of truth** — purpose, audience, required behavior, assumptions,
+decisions, known platform quirks, reliability guarantees, and the UX backlog. Two rules keep the
+tool reliable across versions:
+
+1. **Spec before big changes.** For any rewrite, redesign, or new path, update `SPEC.md` first
+   (goal, the must-keep tested facts, what's out of scope), then change the code/docs to match, then
+   verify the result against the spec.
+2. **Critique the UX in every review.** Beyond "is it correct?", ask whether the tool can do a manual
+   step *for* the user, work for *any* environment (no hardcoded tables/prefixes), and stay a
+   one-command experience. Record UX ideas in `SPEC.md` §10 even if not built now.
+
 ## How to Contribute
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-improvement`)
-3. Make your changes
-4. Run the scripts against a test environment
-5. Submit a pull request
+3. Update `SPEC.md` if behavior changes
+4. Make your changes
+5. Run the scripts against a test environment
+6. Submit a pull request
 
 ## Areas for Contribution
 
