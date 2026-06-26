@@ -126,7 +126,12 @@ OK "Token acquired"
 # ── Step 1: Validate Modern agent ─────────────────────────────────────────────
 Step "Step 1 — Validate Modern Copilot Studio agent (cliagent-* template)"
 $bot = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/bots($BotId)?`$select=botid,name,schemaname,template,configuration" -Headers $dv
-$cfg = $bot.configuration | ConvertFrom-Json
+# An agent that has never been configured/published has a null configuration — handle it safely
+# instead of crashing on ConvertFrom-Json.
+$cfg = if ($bot.configuration) { $bot.configuration | ConvertFrom-Json } else { $null }
+if (-not $cfg) {
+    WARN "This agent has no saved configuration yet (never configured/published). Export will proceed; structure transfers, but there are no instructions/model to carry."
+}
 
 # Hard requirement: cliagent-* template prefix.
 # The template field identifies the agent architecture. Classic agents use default-2.x.x.
@@ -279,6 +284,52 @@ foreach ($crName in $connRefNames) {
 }
 OK "Added $addedConnRefs connection reference(s)"
 
+# ── Custom table dependencies — make the sample self-contained ────────────────
+# If a flow reads/writes a CUSTOM Dataverse table, the agent depends on that table existing in the
+# target or solution import fails. We bundle each custom table's definition (so import recreates it)
+# and capture one seed row (exported in Step 5b) so the installed sample has realistic data.
+# IMPORTANT: only CUSTOM tables (IsCustomEntity=true). System/standard tables already exist in every
+# environment and must never be bundled.
+$TYPE_ENTITY = 1
+$seedTables = @()
+$tableRefs = @()
+foreach ($fid in $flowIds) {
+    try {
+        $wf = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/workflows($fid)?`$select=clientdata" -Headers $dv
+        foreach ($m in [regex]::Matches($wf.clientdata, '"entityName"\s*:\s*"([a-zA-Z0-9_]+)"')) {
+            $tableRefs += $m.Groups[1].Value
+        }
+    } catch {}
+}
+$tableRefs = $tableRefs | Sort-Object -Unique | Where-Object { $_ }
+foreach ($ref in $tableRefs) {
+    # The ref may be the entity SET name (plural) or the logical name. Resolve both ways.
+    $ent = $null
+    try { $ent = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/EntityDefinitions(LogicalName='$ref')?`$select=LogicalName,EntitySetName,MetadataId,PrimaryIdAttribute,PrimaryNameAttribute,IsCustomEntity,IsManaged" -Headers $dv } catch {}
+    if (-not $ent) {
+        try {
+            $byset = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/EntityDefinitions?`$filter=EntitySetName eq '$ref'&`$select=LogicalName,EntitySetName,MetadataId,PrimaryIdAttribute,PrimaryNameAttribute,IsCustomEntity,IsManaged" -Headers $dv).value
+            if ($byset) { $ent = $byset[0] }
+        } catch {}
+    }
+    if (-not $ent) { continue }
+    # Only bundle the maker's OWN tables: custom AND unmanaged. Microsoft platform tables (e.g.
+    # msdyn_*, AI Builder) report IsCustomEntity=true but IsManaged=true — they already exist in
+    # every environment that has the relevant platform feature, so never bundle them.
+    if (-not $ent.IsCustomEntity -or $ent.IsManaged) { INFO "Table '$($ent.LogicalName)': platform/managed table, not bundled (exists in target)"; continue }
+
+    # Add the Entity (with its columns/choices) to the solution so import recreates the table.
+    Add-ToSolution $ent.MetadataId @($TYPE_ENTITY) "custom table '$($ent.LogicalName)'" | Out-Null
+    $seedTables += [pscustomobject]@{
+        logical     = $ent.LogicalName
+        setName     = $ent.EntitySetName
+        primaryId   = $ent.PrimaryIdAttribute
+        primaryName = $ent.PrimaryNameAttribute
+    }
+    OK "Bundled custom table '$($ent.LogicalName)' (definition + 1 seed row)"
+}
+if ($seedTables.Count -eq 0) { INFO "No custom table dependencies to bundle" }
+
 # ── Verification net — fail LOUDLY if the surgical add did not land ────────────
 # This is the safety guarantee against the silent-empty-bundle failure mode. We count what is
 # actually in the solution and compare it to what we expected to add. Sub-components pulled in
@@ -352,6 +403,33 @@ foreach ($skill in $skillsWithAssets) {
     $skillManifest += @{ skill = $skill.name; files = $files }
 }
 
+# ── Step 5b: Export one seed row per bundled custom table ──────────────────────
+Step "Step 5b — Export seed data for custom tables ($($seedTables.Count))"
+$seedManifest = @()
+foreach ($tbl in $seedTables) {
+    try {
+        $row = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/$($tbl.setName)?`$top=1" -Headers $dv).value | Select-Object -First 1
+        if (-not $row) { INFO "  '$($tbl.logical)': source table empty — no seed row"; $seedManifest += @{ logical=$tbl.logical; setName=$tbl.setName; primaryName=$tbl.primaryName; hasSeed=$false }; continue }
+        # Keep only this table's own data columns: prefix_* columns, excluding the primary id and any
+        # navigation/system fields. The primary id is dropped so the target generates a fresh GUID.
+        $prefix = ($tbl.logical -split '_')[0] + '_'
+        $seed = @{}
+        foreach ($p in $row.PSObject.Properties) {
+            if ($p.Name -like "$prefix*" -and $p.Name -ne $tbl.primaryId -and $p.Name -notlike '_*' -and $p.Name -notmatch '@') {
+                $seed[$p.Name] = $p.Value
+            }
+        }
+        $seedDir = Join-Path $OutputDir "seed-data"
+        New-Item -ItemType Directory -Force -Path $seedDir | Out-Null
+        ($seed | ConvertTo-Json -Depth 5) | Set-Content (Join-Path $seedDir "$($tbl.logical).json") -Encoding UTF8
+        OK "  '$($tbl.logical)': 1 seed row ($($seed.Keys.Count) columns)"
+        $seedManifest += @{ logical=$tbl.logical; setName=$tbl.setName; primaryName=$tbl.primaryName; hasSeed=$true }
+    } catch {
+        WARN "  '$($tbl.logical)': could not export seed row ($($_.Exception.Message))"
+        $seedManifest += @{ logical=$tbl.logical; setName=$tbl.setName; primaryName=$tbl.primaryName; hasSeed=$false }
+    }
+}
+
 # ── Step 6: Write manifest.json ───────────────────────────────────────────────
 Step "Step 6 — Writing manifest.json"
 $manifest = @{
@@ -362,9 +440,10 @@ $manifest = @{
     sourceOrg       = $OrgNoTrail
     skillsWithAssets = $skillManifest
     connectorsRequired = $connRefNames
+    seedTables      = $seedManifest
     importNotes = @(
         "Run install.ps1 to import this bundle.",
-        "install.ps1 will: (1) pac solution import, (2) guide manual re-upload of skills with assets.",
+        "install.ps1 will: (1) pac solution import, (2) seed custom tables, (3) guide skill re-upload.",
         "After import, manually wire connections for: $($connRefNames -join ', ')."
     )
 } | ConvertTo-Json -Depth 5
@@ -393,6 +472,13 @@ try {
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entryName) | Out-Null
         }
     }
+    $seedDir = Join-Path $OutputDir "seed-data"
+    if (Test-Path $seedDir) {
+        Get-ChildItem $seedDir -Recurse -File | ForEach-Object {
+            $entryName = $_.FullName.Replace($OutputDir + "\", "") -replace "\\", "/"
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entryName) | Out-Null
+        }
+    }
 } finally {
     $zip.Dispose()
 }
@@ -400,10 +486,11 @@ try {
 $bundleSize = [Math]::Round((Get-Item $bundleZipPath).Length/1KB)
 OK "$bundleZipName ($bundleSize KB)"
 
-# Clean up loose files (agent.zip, manifest.json, skills-with-assets/ now inside bundle)
+# Clean up loose files (now inside bundle)
 Remove-Item (Join-Path $OutputDir "agent.zip") -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $OutputDir "manifest.json") -ErrorAction SilentlyContinue
 Remove-Item $skillsDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $OutputDir "seed-data") -Recurse -Force -ErrorAction SilentlyContinue
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 Write-Host ""

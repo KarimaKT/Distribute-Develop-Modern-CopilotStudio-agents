@@ -106,11 +106,12 @@ OK "Token acquired"
 # ── Step 1: Validate Modern agent ─────────────────────────────────────────────
 Step "Step 1 -- Validate Modern Copilot Studio agent (cliagent-* template)"
 $bot = Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/bots($BotId)?`$select=botid,name,schemaname,template,configuration" -Headers $dv
-$cfg = $bot.configuration | ConvertFrom-Json
+$cfg = if ($bot.configuration) { $bot.configuration | ConvertFrom-Json } else { $null }
 if ($bot.template -notlike "cliagent-*") {
     Write-Error "template='$($bot.template)' -- expected 'cliagent-*'. Classic agents (default-2.x.x) use a different workflow; this toolkit is for cliagent-* agents only."
 }
-if (-not $cfg.agentSettings) { WARN "bot.configuration has no 'agentSettings' block -- this agent may be Classic despite the template value." }
+if (-not $cfg) { WARN "This agent has no saved configuration yet (never configured/published) -- instructions/model won't be captured." }
+elseif (-not $cfg.agentSettings) { WARN "bot.configuration has no 'agentSettings' block -- this agent may be Classic despite the template value." }
 OK "$($bot.name) ($($bot.schemaname)) -- template: $($bot.template)"
 
 # ── Step 2: pac copilot clone → editable YAML (for reading / diffing / git) ───
@@ -136,22 +137,26 @@ OK "Deployable bundle: $(Split-Path $bundleZip -Leaf)"
 
 # ── Step 4: Surface editable instructions (the deployable edit surface) ───────
 Step "Step 4 -- Surface editable instructions + model config"
-# agent-config.json (full bot.configuration) is the authoritative, deployable edit surface.
-$configPath = Join-Path $sampleDir "agent-config.json"
-$bot.configuration | Set-Content $configPath -Encoding UTF8
-OK "agent-config.json saved (model + AI settings + instructions -- deployable)"
+if ($cfg) {
+    # agent-config.json (full bot.configuration) is the authoritative, deployable edit surface.
+    $configPath = Join-Path $sampleDir "agent-config.json"
+    $bot.configuration | Set-Content $configPath -Encoding UTF8
+    OK "agent-config.json saved (model + AI settings + instructions -- deployable)"
 
-# Also write instructions as a friendly Markdown file for easy editing.
-$instrPath = Join-Path $sampleDir "$AgentName.instructions.md"
-$instrText = ($cfg.agentSettings.instructions.segments | Where-Object { $_.value } | ForEach-Object { $_.value }) -join "`n`n"
-@"
+    # Also write instructions as a friendly Markdown file for easy editing.
+    $instrPath = Join-Path $sampleDir "$AgentName.instructions.md"
+    $instrText = ($cfg.agentSettings.instructions.segments | Where-Object { $_.value } | ForEach-Object { $_.value }) -join "`n`n"
+    @"
 <!-- Edit this file to change the agent's instructions, then run develop/install.ps1. -->
 <!-- These instructions ARE deployed (via a Dataverse bot.configuration update). -->
 <!-- Model: $($cfg.agentSettings.model.series)  |  Agent: $AgentName -->
 
 $instrText
 "@ | Set-Content $instrPath -Encoding UTF8
-OK "$AgentName.instructions.md saved ($($instrText.Length) chars -- edit this to change behaviour)"
+    OK "$AgentName.instructions.md saved ($($instrText.Length) chars -- edit this to change behaviour)"
+} else {
+    WARN "No saved configuration -- skipping agent-config.json and instructions.md (nothing to edit yet)."
+}
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 Write-Host ""

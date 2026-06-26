@@ -62,8 +62,39 @@ crashes. This tool fills that gap so a modern agent travels in one piece.
 - Export a modern Copilot Studio agent as a self-contained bundle (`distribute/`).
 - Install that bundle into any environment, with honest post-install guidance (`distribute/`).
 - Clone an agent to editable files, edit locally, and redeploy reliably (`develop/`).
-- Detect and clearly report conditions the maker must resolve (missing dependencies, skills with a
-  code file, flows needing a connection, publish).
+- **Self-contained samples:** when an agent's flows depend on a **custom** Dataverse table, bundle
+  the table definition + one seed row so install recreates a working sample automatically (§4.5).
+- Detect and clearly report conditions the maker must resolve (other missing dependencies, skills
+  with a code file, flows needing a connection, publish).
+
+### 4.5 Self-contained table dependencies (custom Dataverse tables)
+**Problem:** a flow that reads/writes a **custom** table (e.g. `cr1a2_orders`) makes the agent
+depend on that table existing in the target. Without it, solution import fails.
+
+**Behavior (tested mechanism — see §11):**
+- **export** (both paths, in `distribute/export.ps1`):
+  1. Detect custom-table references in each flow's `clientdata` — `"entityName":"<set or logical>"`
+     and entity-set URL refs. Map each to its `EntityDefinitions` record; **keep only the maker's own
+     tables: `IsCustomEntity = true` AND `IsManaged = false`** (Microsoft platform tables such as
+     `msdyn_*`/AI Builder report `IsCustomEntity=true` but `IsManaged=true` and already exist in the
+     target — never bundle those; system/standard tables are skipped too).
+  2. Add each custom table's **Entity** to the solution: `AddSolutionComponent ComponentType=1
+     AddRequiredComponents=$true` (pulls the table's columns + choice sets). Import will recreate it.
+  3. Export **one** seed row per table to `seed-data/<logical>.json` — only the table's own custom
+     columns (those starting with the table's publisher prefix), excluding the primary-id and all
+     system/navigation fields. Record each table in `manifest.json` under `seedTables`
+     (`logical`, `setName`, `primaryName`).
+- **install** (both paths): after a verified solution import, for each `seedTables` entry, if the
+  target table currently has **zero rows**, insert the one seed row. This is **best-effort and
+  non-fatal** — a failed seed insert warns but never aborts (the table and agent still installed).
+
+**Why one seed row:** enough for the agent to have realistic sample data to operate on, without
+shipping someone else's full dataset. Makers can add their own data afterward.
+
+**Assumptions:** A8 (below). **Decision:** D9 (below). **Backlog U1 is now resolved by this.**
+
+### 4.6 (was 4.5) the rest of the path behaviors continue below
+
 
 ### 3.2 Out of scope (today)
 - Classic (topic-based) agents — use standard Power Platform solution tooling.
@@ -175,12 +206,17 @@ Any **R** row must be converted to **T** (or corrected) when a suitable test age
 - A1. Source and target are Dataverse environments the user can reach with `pac` + `az`.
 - A2. The agent's `template` starts with `cliagent-` (modern). Verified at runtime.
 - A3. The maker's publisher exists in the source env (resolved by prefix or unique name).
-- A4. `bot.configuration` is a string field; PATCH bodies must string-encode it. (Tested.)
+- A4. `bot.configuration` is a string field; PATCH bodies must string-encode it. (Tested.) An agent
+  that was never configured/published has a **null** configuration — export must handle that without
+  crashing (tested via a minimal agent; structure still transfers, no instructions/model to carry).
 - A5. Local cloned YAML from `kind:` onward maps byte-for-byte to a component's `data` field;
   `mcs.metadata.description` maps to the `description` column. (Tested.)
 - A6. The maker performs the one-click Publish themselves (no reliable CLI publish).
 - A7. Dependencies an agent needs (custom tables, custom connectors) either exist in the target or
-  are created by the maker — see UX backlog U1.
+  are created by the maker — see UX backlog U1. **(Custom tables: now auto-bundled, §4.5.)**
+- A8. Detecting table dependencies from flow `clientdata` is heuristic (string refs to entity set /
+  logical names). We only act on tables confirmed `IsCustomEntity=true`; anything ambiguous is left
+  to the existing missing-dependency detection (§4.2 step 2), which fails loudly with the name.
 
 ---
 
@@ -198,6 +234,9 @@ Any **R** row must be converted to **T** (or corrected) when a suitable test age
 - D6. **Publisher accepts prefix or unique name** (makers know the prefix).
 - D7. **Published on personal GitHub** as `Distribute-Develop-Modern-CopilotStudio-agents`.
 - D8. **Docs are low-code-first**, jargon deferred to `LEARNINGS.md`.
+- D9. **Self-contained samples auto-bundle custom table dependencies** (definition + 1 seed row) so
+  a table-backed agent installs and works with one command. Only custom tables; system tables are
+  never bundled. Seed insert is best-effort/non-fatal. (2026-06-26)
 
 ---
 
@@ -226,11 +265,9 @@ Any **R** row must be converted to **T** (or corrected) when a suitable test age
 
 ## 10. UX backlog (improvements to make it more generic / easier)
 
-- U1. **Self-contained samples for table-backed agents.** If an agent's flow depends on a custom
-  Dataverse table, install fails unless the table exists. Options considered:
-  (a) auto-bundle the table definition + 1 seed row so install recreates it (most generic),
-  (b) detect + guide the maker to create/link a table, (c) install offers to create an empty table.
-  **Status: decision pending with user.**
+- U1. ~~Self-contained samples for table-backed agents.~~ **RESOLVED (§4.5, D9):** export now
+  auto-bundles each custom table's definition + 1 seed row; install recreates the table and seeds
+  one row if empty. (System tables are never bundled; seed insert is best-effort.)
 - U2. Auto-detect the agent id / offer a picker, so makers don't hunt for the GUID.
 - U3. Optional `-WhatIf` dry run for both installs.
 - U4. Multi-agent export (whole environment).
@@ -247,5 +284,20 @@ Any **R** row must be converted to **T** (or corrected) when a suitable test age
 - Knowledge web link + description: injected, exported, imported to a second env, all fields
   survived.
 - Failed-import detection: an agent whose flow needs a missing custom table aborts with the cause.
+- **Self-contained tables (batch 1, 2026-06-26):** exported a table-backed agent (Presentation
+  Buddy → custom `cr7a0_coffecoorders`); verified only the maker's own unmanaged table is bundled
+  (a managed `msdyn_*` platform table is correctly skipped via `IsManaged=false`); installed to a
+  clean env where the table did not exist → table recreated (unmanaged), 1 seed row inserted with
+  all columns + choice value intact + fresh GUID, agent installed (this exact agent failed to
+  install before the feature). Re-install is idempotent (existing data → no duplicate seed).
 
 Keep this section updated as evidence is added or invalidated.
+
+**Batch 2 (2026-06-26) — edge cases, 2 fixes:**
+- No-table agent (Fabric Analyst): table logic is a clean no-op (seedTables=0, no seed-data, bundle
+  unchanged). Develop path regression after the seed edits: full export+deploy clean.
+- Minimal/empty agent (Clean Test Agent, **null `bot.configuration`**): **caught a crash** in both
+  export scripts (`ConvertFrom-Json` on null) → fixed to handle null config with a clear warning;
+  exports cleanly (bot.xml present, 0 components) and installs via `-BundleDir`.
+- `-BundleDir` install path (extracted folder, not zip): verified end-to-end.
+- Table+seed feature works through the **develop** path too (it reuses distribute export).

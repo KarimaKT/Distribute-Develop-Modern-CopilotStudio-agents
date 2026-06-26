@@ -148,6 +148,26 @@ if (($importExit -ne 0) -or ($importText -match 'cannot be imported|Missing depe
 $botId = $bot.botid
 OK "Solution imported -- bot present: $($bot.name) ($botId)"
 
+# ── Step 1b: Seed custom tables (best-effort, non-fatal) ──────────────────────
+$seedTables = @()
+if ($manifest.PSObject.Properties["seedTables"]) { $seedTables = @($manifest.seedTables) }
+if ($seedTables.Count -gt 0) {
+    Step "Step 1b -- Seeding $($seedTables.Count) custom table(s) with sample data"
+    foreach ($tbl in $seedTables) {
+        try {
+            if (-not $tbl.hasSeed) { INFO "  '$($tbl.logical)': no seed row in bundle -- skipping"; continue }
+            $existing = (Invoke-RestMethod -Uri "$dvBase/$($tbl.setName)?`$top=1&`$select=$($tbl.primaryName)" -Headers $dv).value
+            if ($existing.Count -gt 0) { INFO "  '$($tbl.logical)': already has data -- not seeding"; continue }
+            $seedFile = Join-Path $tempExtractDir "seed-data\$($tbl.logical).json"
+            if (-not (Test-Path $seedFile)) { INFO "  '$($tbl.logical)': seed file missing -- skipping"; continue }
+            Invoke-RestMethod -Uri "$dvBase/$($tbl.setName)" -Method POST -Headers $dv -Body (Get-Content $seedFile -Raw) | Out-Null
+            OK "  '$($tbl.logical)': seeded 1 sample row"
+        } catch {
+            WARN "  '$($tbl.logical)': could not seed ($($_.Exception.Message))"
+        }
+    }
+}
+
 # ── Step 2: Apply instruction / model / AI-settings edits (bot.configuration) ─
 Step "Step 2 -- Apply your instruction + model edits (bot.configuration)"
 $configPath = Join-Path $SampleDir "agent-config.json"

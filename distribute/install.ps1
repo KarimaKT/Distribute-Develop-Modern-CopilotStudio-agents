@@ -202,6 +202,35 @@ if ($importFailed -or -not $verBot) {
 OK "pac solution import verified -- bot present: $($verBot.name) ($($verBot.botid))"
 
 # ---------------------------------------------------------------------------
+# Step 1b — Seed custom tables (make the sample usable immediately)
+# ---------------------------------------------------------------------------
+# The bundle may include custom Dataverse tables the agent's flows use. Solution import recreates
+# the table definitions; here we add one sample row per table IF it is currently empty, so the
+# installed sample has realistic data to work with. Best-effort and NON-FATAL: a failed seed never
+# aborts the install (the table and agent are already in place).
+$seedTables = @()
+if ($manifest.PSObject.Properties["seedTables"]) { $seedTables = @($manifest.seedTables) }
+if ($seedTables.Count -gt 0) {
+    Step "Step 1b — Seeding $($seedTables.Count) custom table(s) with sample data"
+    $seedToken = (az account get-access-token --resource $OrgNoTrail | ConvertFrom-Json).accessToken
+    $seedDv = @{ Authorization="Bearer $seedToken"; "OData-MaxVersion"="4.0"; "OData-Version"="4.0"; Accept="application/json"; "Content-Type"="application/json" }
+    foreach ($tbl in $seedTables) {
+        try {
+            if (-not $tbl.hasSeed) { INFO "  '$($tbl.logical)': no seed row in bundle — skipping"; continue }
+            $existing = (Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/$($tbl.setName)?`$top=1&`$select=$($tbl.primaryName)" -Headers $seedDv).value
+            if ($existing.Count -gt 0) { INFO "  '$($tbl.logical)': already has data — not seeding"; continue }
+            $seedFile = Join-Path $BundleDir "seed-data\$($tbl.logical).json"
+            if (-not (Test-Path $seedFile)) { INFO "  '$($tbl.logical)': seed file missing — skipping"; continue }
+            $seedBody = Get-Content $seedFile -Raw
+            Invoke-RestMethod -Uri "$OrgNoTrail/api/data/v9.2/$($tbl.setName)" -Method POST -Headers $seedDv -Body $seedBody | Out-Null
+            OK "  '$($tbl.logical)': seeded 1 sample row"
+        } catch {
+            WARN "  '$($tbl.logical)': could not seed ($($_.Exception.Message)) — add a row manually if needed"
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Step 2 — Fix skills with assets
 # ---------------------------------------------------------------------------
 # Step 2 — Handle skills with assets (require manual upload — no silent degradation)

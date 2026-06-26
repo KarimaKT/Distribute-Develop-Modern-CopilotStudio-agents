@@ -3,6 +3,19 @@
 *Authored from hands-on testing, June 2026.*
 *Tests run against a real Modern Copilot Studio agent (`cliagent-1.0.0`) exported from one environment and imported into another.*
 
+> **New here?** Start with the [README](README.md) — it's the friendly, low-code guide to using the
+> tool. **This document is the deep end:** it's where we record the exact technical findings, the
+> platform quirks we work around, and the evidence behind every design choice — for contributors and
+> for anyone who wants to know *why* the tool behaves the way it does. It uses precise product
+> terms (template codenames, component types, API field names) on purpose. The plain-language
+> version of all of this lives in the README and [SPEC.md](SPEC.md).
+>
+> **The short version:** Microsoft's built-in tools for moving agents between environments were
+> built for the older, *classic* (topic-based) agents. For *modern* agents (built from instructions
+> + tools + knowledge), several of those commands silently drop pieces or crash. This tool moves a
+> modern agent reliably by installing it as a Dataverse solution and then applying any edits with
+> small, verified Dataverse updates — and it checks that everything actually landed.
+
 ---
 
 ## 0. Architecture decision: both paths deploy via solution import (NOT pac push)

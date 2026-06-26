@@ -51,7 +51,9 @@ You get **one file**: `MyAgent-bundle.zip`. Share it, commit it, or email it.
 
 The agent appears in Copilot Studio. The script then prints the exact finishing steps **for that specific agent** — only the ones that actually apply.
 
-> **If install stops with a "missing dependency" message:** your agent uses something that doesn't exist yet in the target environment — most often a custom Dataverse table that one of its flows reads or writes. The message names exactly what's missing. Create or import that piece in the target, then run install again. (The tool checks for this instead of pretending the install worked.)
+> **Custom tables come along automatically.** If your agent's flows use a custom Dataverse table, the export bundles that table's design **plus one sample row**, and install recreates it for you — so a table-backed sample just works. (Only *your* tables; Microsoft's built-in tables already exist everywhere and are left alone. If a row already exists in the target, install won't add a duplicate.)
+>
+> **If install ever stops with a "missing dependency" message:** your agent needs something the target environment doesn't have yet (for example a custom connector). The message names exactly what's missing — add it in the target, then run install again. (The tool checks for this instead of pretending the install worked.)
 
 ### 3. Finish setup (only what applies to your agent)
 
@@ -73,6 +75,7 @@ The agent appears in Copilot Studio. The script then prints the exact finishing 
 | Knowledge — web links | ✅ | Link and its description come across |
 | Knowledge — files (PDF, Word) | ✅ | The file travels in the bundle |
 | Test cases | ✅ | Fully |
+| Custom Dataverse tables a flow uses | ✅ | Table design + one sample row are bundled and recreated |
 | Child-agent tools · MCP tools · custom connectors with code | see notes † | Transfer-able but need their target-side setup — verify for your agent |
 
 † Reasoned from how connectors and solutions behave, but not exercised in this tool's own tests. See [LEARNINGS.md](LEARNINGS.md).
